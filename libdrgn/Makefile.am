@@ -45,6 +45,8 @@ libdrgnimpl_la_SOURCES = $(ARCH_DEFS_PYS:_defs.py=.c) \
 			 cfi.c \
 			 cfi.h \
 			 cityhash.h \
+			 crc32.c \
+			 crc32.h \
 			 debug_info.c \
 			 debug_info.h \
 			 dwarf_constants.c \
