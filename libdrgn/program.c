@@ -105,6 +105,9 @@ void drgn_program_init(struct drgn_program *prog,
 	char *env = getenv("DRGN_PREFER_ORC_UNWINDER");
 	prog->prefer_orc_unwinder = env && atoi(env);
 	drgn_object_init(&prog->vmemmap, prog);
+	prog->log_level = 6;
+	prog->log_fd = -1;
+	prog->log_file = stderr;
 }
 
 void drgn_program_deinit(struct drgn_program *prog)

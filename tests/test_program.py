@@ -893,3 +893,32 @@ class TestCoreDump(TestCase):
         with self.assertRaisesRegex(FaultError, "memory not saved in core dump") as cm:
             prog.read(0xFFFF0000, len(data) + 4)
         self.assertEqual(cm.exception.address, 0xFFFF000C)
+
+
+class TestLog(TestCase):
+    def test_log_level(self):
+        prog = Program()
+        self.assertEqual(prog.log_level, 6)
+        for level in range(9):
+            with self.subTest(level=level):
+                prog.log_level = level
+                self.assertEqual(prog.log_level, level)
+
+    def test_log_level_invalid(self):
+        prog = Program()
+        for level in -1, 9, -(2**32), 2**32, -(2**64), 2**64:
+            with self.subTest(level=level):
+                self.assertRaisesRegex(
+                    ValueError,
+                    r"^invalid log level$",
+                    setattr,
+                    prog,
+                    "log_level",
+                    level,
+                )
+
+    def test_set_log_fd(self):
+        prog = Program()
+        prog.set_log_fd(2)
+        prog.set_log_fd(-1)
+        self.assertRaises(TypeError, prog.set_log_fd, "/dev/null")

@@ -260,6 +260,45 @@ void drgn_error_destroy(struct drgn_error *err);
 
 /** @} */
 
+/**
+ * @defgroup Logging
+ *
+ * Logging in libdrgn.
+ *
+ * libdrgn may output logs. This is configured for each @ref drgn_program. The
+ * default configuration is to log to standard error with a log level of 6
+ * (everything other than informational and debug messages).
+ *
+ * @{
+ */
+
+struct drgn_program;
+
+/**
+ * Set the log level of a @ref drgn_program.
+ *
+ * Future messages with a level less than the given level will be logged. The
+ * levels are the same as the [syslog message
+ * severities](https://datatracker.ietf.org/doc/html/rfc5424#section-6.2.1).
+ */
+struct drgn_error *drgn_program_set_log_level(struct drgn_program *prog,
+					      int level);
+
+/**
+ * Get the current log level of a @ref drgn_program.
+ *
+ * @sa drgn_program_set_log_level()
+ */
+int drgn_program_get_log_level(struct drgn_program *prog);
+
+/** Direct logs to the given file descriptor. */
+struct drgn_error *drgn_program_set_log_fd(struct drgn_program *prog, int fd);
+
+/** Direct logs to the given @c stdio stream. */
+struct drgn_error *drgn_program_set_log_file(struct drgn_program *prog,
+					     FILE *file);
+
+/** @} */
 
 /**
  * @defgroup Languages Languages

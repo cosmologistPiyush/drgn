@@ -186,6 +186,13 @@ struct drgn_program {
 	bool in_address_translation;
 	/* Whether @ref drgn_program::direct_mapping_offset has been cached. */
 	bool direct_mapping_offset_cached;
+
+	/*
+	 * Logging.
+	 */
+	int log_level;
+	int log_fd;
+	FILE *log_file;
 };
 
 /** Initialize a @ref drgn_program. */

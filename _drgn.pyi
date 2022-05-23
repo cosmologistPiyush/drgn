@@ -821,6 +821,53 @@ class Program:
         :param lang: :attr:`Type.language`
         """
         ...
+    log_level: int
+    """
+    Log level of the program.
+
+    drgn may log progress, errors, etc. (for example, when searching for
+    debugging information). Log messages with a level less than this are
+    logged. The levels are:
+
+    .. list-table::
+        :header-rows: 1
+        :widths: auto
+
+        * - Value
+          - Description
+        * - 0
+          - Emergency: system is unusable
+        * - 1
+          - Alert: action must be taken immediately
+        * - 2
+          - Critical: critical conditions
+        * - 3
+          - Error: error conditions
+        * - 4
+          - Warning: warning conditions
+        * - 5
+          - Notice: normal but significant condition
+        * - 6
+          - Informational: informational messages
+        * - 7
+          - Debug: debug-level messages
+
+    (These are the same as the `syslog message severities
+    <https://datatracker.ietf.org/doc/html/rfc5424#section-6.2.1>`_.)
+
+    The default is 6, which logs everything other than informational and debug
+    messages.
+    """
+
+    def set_log_fd(self, fd: int) -> None:
+        """
+        Set the file descriptor to log to.
+
+        The default is to log to standard error.
+
+        :param fd: File descriptor. A negative value disables logging.
+        """
+        ...
 
 class ProgramFlags(enum.Flag):
     """

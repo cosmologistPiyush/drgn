@@ -1,6 +1,8 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
+#include <limits.h>
+
 #include "drgnpy.h"
 #include "../hash_table.h"
 #include "../program.h"
@@ -129,6 +131,46 @@ static int Program_clear(Program *self)
 	pyobjectp_set_init(&self->objects);
 	Py_CLEAR(self->cache);
 	return 0;
+}
+
+static PyObject *Program_get_log_level(Program *self, void *arg)
+{
+	return PyLong_FromLong(drgn_program_get_log_level(&self->prog));
+}
+
+static int Program_set_log_level(Program *self, PyObject *value, void *arg)
+{
+	int overflow;
+	long level = PyLong_AsLongAndOverflow(value, &overflow);
+	if (level == -1 && PyErr_Occurred())
+		return -1;
+	if (overflow || level < INT_MIN || level > INT_MAX) {
+		PyErr_SetString(PyExc_ValueError, "invalid log level");
+		return -1;
+	}
+	struct drgn_error *err = drgn_program_set_log_level(&self->prog, level);
+	if (err) {
+		set_drgn_error(err);
+		return -1;
+	}
+	return 0;
+}
+
+static PyObject *Program_set_log_fd(Program *self, PyObject *args,
+				    PyObject *kwds)
+{
+	static char *keywords[] = {"fd", NULL};
+	struct drgn_error *err;
+
+	int fd;
+	if (!PyArg_ParseTupleAndKeywords(args, kwds, "i:set_log_fd", keywords,
+					 &fd))
+	    return NULL;
+
+	err = drgn_program_set_log_fd(&self->prog, fd);
+	if (err)
+		return set_drgn_error(err);
+	Py_RETURN_NONE;
 }
 
 static struct drgn_error *py_memory_read_fn(void *buf, uint64_t address,
@@ -999,6 +1041,8 @@ static int Program_set_language(Program *self, PyObject *value, void *arg)
 }
 
 static PyMethodDef Program_methods[] = {
+	{"set_log_fd", (PyCFunction)Program_set_log_fd,
+	 METH_VARARGS | METH_KEYWORDS, drgn_Program_set_log_fd_DOC},
 	{"add_memory_segment", (PyCFunction)Program_add_memory_segment,
 	 METH_VARARGS | METH_KEYWORDS, drgn_Program_add_memory_segment_DOC},
 	{"add_type_finder", (PyCFunction)Program_add_type_finder,
@@ -1089,6 +1133,8 @@ static PyMemberDef Program_members[] = {
 };
 
 static PyGetSetDef Program_getset[] = {
+	{"log_level", (getter)Program_get_log_level,
+	 (setter)Program_set_log_level, drgn_Program_log_level_DOC},
 	{"flags", (getter)Program_get_flags, NULL, drgn_Program_flags_DOC},
 	{"platform", (getter)Program_get_platform, NULL,
 	 drgn_Program_platform_DOC},
