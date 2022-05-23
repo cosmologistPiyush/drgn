@@ -149,6 +149,8 @@ struct drgn_program {
 	struct {
 		/** <tt>uname -r</tt> */
 		char osrelease[128];
+		/** Build ID. */
+		char build_id[128];
 		/** PAGE_SIZE of the kernel. */
 		uint64_t page_size;
 		/**
@@ -167,6 +169,8 @@ struct drgn_program {
 		uint64_t va_bits;
 		/** Whether 5-level paging was enabled on x86-64. */
 		bool pgtable_l5_enabled;
+		/** Length of build ID. */
+		unsigned int build_id_len;
 		/** PAGE_SHIFT of the kernel (derived from PAGE_SIZE). */
 		int page_shift;
 	} vmcoreinfo;
