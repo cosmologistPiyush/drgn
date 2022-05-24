@@ -59,10 +59,6 @@ struct drgn_error *drgn_error_libelf(void)
 struct drgn_error *drgn_error_libdw(void)
 	__attribute__((__returns_nonnull__));
 
-/** Create a @ref drgn_error from the libdwfl error indicator. */
-struct drgn_error *drgn_error_libdwfl(void)
-	__attribute__((__returns_nonnull__));
-
 /**
  * Create a @ref drgn_error with a type name.
  *

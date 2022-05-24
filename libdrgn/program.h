@@ -12,7 +12,6 @@
 #ifndef DRGN_PROGRAM_H
 #define DRGN_PROGRAM_H
 
-#include <elfutils/libdwfl.h>
 #include <libelf.h>
 #include <sys/types.h>
 #ifdef WITH_LIBKDUMPFILE
@@ -28,6 +27,7 @@
 #include "type.h"
 #include "vector.h"
 
+struct drgn_module;
 struct drgn_symbol;
 
 /**
@@ -108,6 +108,7 @@ struct drgn_program {
 	 * Debugging information.
 	 */
 	struct drgn_object_index oindex;
+	/* TODO: at this point, we should just embed it. */
 	struct drgn_debug_info *dbinfo;
 
 	/*
@@ -141,6 +142,15 @@ struct drgn_program {
 	uint64_t aarch64_insn_pac_mask;
 	bool core_dump_notes_cached;
 	bool prefer_orc_unwinder;
+
+	// TODO: put this stuff in a union with Linux kernel stuff.
+	struct {
+		uint64_t at_phdr;
+		uint64_t at_phent;
+		uint64_t at_phnum;
+		uint64_t at_sysinfo_ehdr;
+	} auxv;
+	bool auxv_cached;
 
 	/*
 	 * Linux kernel-specific.
@@ -230,6 +240,8 @@ struct drgn_error *drgn_program_init_kernel(struct drgn_program *prog);
  * Implement @ref drgn_program_from_pid() on an initialized @ref drgn_program.
  */
 struct drgn_error *drgn_program_init_pid(struct drgn_program *prog, pid_t pid);
+
+struct drgn_error *drgn_program_cache_auxv(struct drgn_program *prog);
 
 static inline struct drgn_error *
 drgn_program_is_little_endian(struct drgn_program *prog, bool *ret)
@@ -344,7 +356,7 @@ struct drgn_error *drgn_program_cache_prstatus_entry(struct drgn_program *prog,
  */
 bool drgn_program_find_symbol_by_address_internal(struct drgn_program *prog,
 						  uint64_t address,
-						  Dwfl_Module *module,
+						  struct drgn_module *module,
 						  struct drgn_symbol *ret);
 
 /**

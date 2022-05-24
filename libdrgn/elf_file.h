@@ -68,6 +68,8 @@ enum drgn_section_index {
 
 	DRGN_SCN_TEXT = DRGN_SECTION_INDEX_NUM_DATA,
 	DRGN_SCN_GOT,
+	DRGN_SCN_GNU_DEBUGLINK,
+	DRGN_SCN_GNU_DEBUGALTLINK,
 
 	/** Number of section indices. */
 	DRGN_SECTION_INDEX_NUM,
@@ -78,7 +80,10 @@ struct drgn_elf_file {
 	/** Module using this file. */
 	struct drgn_module *module;
 	/** Filesystem path to this file. */
-	const char *path;
+	char *path;
+	char *image; // TODO: document
+	int fd; // TODO: document
+	bool is_loadable; // TODO: document
 	/** libelf handle. */
 	Elf *elf;
 	/** libdw handle if we're using DWARF information from this file. */
@@ -97,6 +102,7 @@ struct drgn_elf_file {
 	Elf_Scn *scns[DRGN_SECTION_INDEX_NUM];
 	/** Data cached for important ELF sections. */
 	Elf_Data *scn_data[DRGN_SECTION_INDEX_NUM_DATA];
+	// TODO: need to populate these
 	/**
 	 * If the file has a debugaltlink file, the debugaltlink file's
 	 * `.debug_info` section data.
@@ -110,8 +116,8 @@ struct drgn_elf_file {
 };
 
 struct drgn_error *drgn_elf_file_create(struct drgn_module *module,
-					const char *path, Elf *elf,
-					struct drgn_elf_file **ret);
+					const char *path, int fd, char *image,
+					Elf *elf, struct drgn_elf_file **ret);
 
 void drgn_elf_file_destroy(struct drgn_elf_file *file);
 
@@ -141,6 +147,12 @@ static inline uint64_t
 drgn_elf_file_address_mask(const struct drgn_elf_file *file)
 {
 	return drgn_platform_address_mask(&file->platform);
+}
+
+static inline bool drgn_elf_file_has_dwarf(const struct drgn_elf_file *file)
+{
+	return (file->scns[DRGN_SCN_DEBUG_INFO] &&
+		file->scns[DRGN_SCN_DEBUG_ABBREV]);
 }
 
 struct drgn_error *

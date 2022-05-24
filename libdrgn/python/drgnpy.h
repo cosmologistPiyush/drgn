@@ -92,6 +92,21 @@ typedef struct {
 
 typedef struct {
 	PyObject_HEAD
+	struct drgn_module *module;
+} Module;
+
+typedef struct {
+	PyObject_HEAD
+	struct drgn_module_iterator *it;
+} ModuleIterator;
+
+#define ModuleTryFilesResult_fields(FIELD, ARG, SEP)		\
+	FIELD(ARG, loaded_status, ModuleFileStatus_class) SEP	\
+	FIELD(ARG, debug_status, ModuleFileStatus_class)
+DEFINE_DATACLASS_TYPE(ModuleTryFilesResult);
+
+typedef struct {
+	PyObject_HEAD
 	/*
 	 * "Python-friendly" name used for the object, which may differ from the
 	 * language name if the language name is not a valid identifier (e.g.,
@@ -195,6 +210,7 @@ typedef struct {
 
 extern PyObject *Architecture_class;
 extern PyObject *FindObjectFlags_class;
+extern PyObject *ModuleFileStatus_class;
 extern PyObject *PlatformFlags_class;
 extern PyObject *PrimitiveType_class;
 extern PyObject *ProgramFlags_class;
@@ -204,12 +220,18 @@ extern PyObject *SymbolKind_class;
 extern PyObject *TypeKind_class;
 extern PyTypeObject DrgnObject_type;
 extern PyTypeObject DrgnType_type;
+extern PyTypeObject ExtraModule_type;
 extern PyTypeObject FaultError_type;
 extern PyTypeObject Language_type;
+extern PyTypeObject LinuxKernelLoadableModule_type;
+extern PyTypeObject MainModule_type;
+extern PyTypeObject ModuleIterator_type;
+extern PyTypeObject Module_type;
 extern PyTypeObject ObjectIterator_type;
 extern PyTypeObject Platform_type;
 extern PyTypeObject Program_type;
 extern PyTypeObject Register_type;
+extern PyTypeObject SharedLibraryModule_type;
 extern PyTypeObject StackFrame_type;
 extern PyTypeObject StackTrace_type;
 extern PyTypeObject Symbol_type;
@@ -218,6 +240,7 @@ extern PyTypeObject ThreadIterator_type;
 extern PyTypeObject TypeMember_type;
 extern PyTypeObject TypeParameter_type;
 extern PyTypeObject TypeTemplateParameter_type;
+extern PyTypeObject VdsoModule_type;
 extern PyObject *MissingDebugInfoError;
 extern PyObject *ObjectAbsentError;
 extern PyObject *OutOfBoundsError;
@@ -232,6 +255,8 @@ void *set_error_type_name(const char *format,
 			  struct drgn_qualified_type qualified_type);
 
 #define call_tp_alloc(type) ((type *)type##_type.tp_alloc(&type##_type, 0))
+
+PyObject *Module_wrap(struct drgn_module *module);
 
 PyObject *Language_wrap(const struct drgn_language *language);
 int language_converter(PyObject *o, void *p);
@@ -291,7 +316,10 @@ DrgnType *Program_array_type(Program *self, PyObject *args, PyObject *kwds);
 DrgnType *Program_function_type(Program *self, PyObject *args, PyObject *kwds);
 
 int append_string(PyObject *parts, const char *s);
+int append_u64_hex(PyObject *parts, uint64_t value);
 int append_format(PyObject *parts, const char *format, ...);
+int append_attr_repr(PyObject *parts, PyObject *obj, const char *attr_name);
+int append_attr_str(PyObject *parts, PyObject *obj, const char *attr_name);
 PyObject *join_strings(PyObject *parts);
 // Implementation of _repr_pretty_() for IPython/Jupyter that just calls str().
 PyObject *repr_pretty_from_str(PyObject *self, PyObject *args, PyObject *kwds);

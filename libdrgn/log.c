@@ -42,21 +42,28 @@ drgn_program_set_log_file(struct drgn_program *prog, FILE *file)
 	return NULL;
 }
 
+bool drgn_should_log(struct drgn_program *prog, enum drgn_log_level log_level)
+{
+	return log_level < prog->log_level;
+}
+
 void drgn_error_log(enum drgn_log_level log_level, struct drgn_program *prog,
 		    struct drgn_error *err, const char *format, ...)
 {
-	if (log_level >= prog->log_level)
+	if (!drgn_should_log(prog, log_level))
 		return;
 
 	va_list ap;
 	va_start(ap, format);
 
 	if (prog->log_file) {
-		vfprintf(prog->log_file, format, ap);
+		if (format)
+			vfprintf(prog->log_file, format, ap);
 		if (err)
 			drgn_error_fwrite(prog->log_file, err);
 	} else if (prog->log_fd >= 0) {
-		vdprintf(prog->log_fd, format, ap);
+		if (format)
+			vdprintf(prog->log_fd, format, ap);
 		if (err)
 			drgn_error_dwrite(prog->log_fd, err);
 	}

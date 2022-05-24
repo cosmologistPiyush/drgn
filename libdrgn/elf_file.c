@@ -1,7 +1,8 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
-#include <elfutils/libdwfl.h>
+#include <stdlib.h>
+#include <unistd.h>
 
 #include "array.h"
 #include "debug_info.h"
@@ -40,52 +41,112 @@ static const char * const drgn_section_index_names[] = {
 	[DRGN_SCN_DEBUG_LOCLISTS] = ".debug_loclists",
 	[DRGN_SCN_TEXT] = ".text",
 	[DRGN_SCN_GOT] = ".got",
+	[DRGN_SCN_GNU_DEBUGLINK] = ".gnu_debuglink",
+	[DRGN_SCN_GNU_DEBUGALTLINK] = ".gnu_debugaltlink",
 };
 
 struct drgn_error *drgn_elf_file_create(struct drgn_module *module,
-					const char *path, Elf *elf,
-					struct drgn_elf_file **ret)
+					const char *path, int fd, char *image,
+					Elf *elf, struct drgn_elf_file **ret)
 {
 	struct drgn_error *err;
+
+	if (elf_kind(elf) != ELF_K_ELF)
+		return drgn_error_create(DRGN_ERROR_OTHER, "not an ELF file");
+
 	GElf_Ehdr ehdr_mem, *ehdr = gelf_getehdr(elf, &ehdr_mem);
 	if (!ehdr)
-		return drgn_error_libelf();
-	size_t shstrndx;
-	if (elf_getshdrstrndx(elf, &shstrndx))
 		return drgn_error_libelf();
 
 	struct drgn_elf_file *file = calloc(1, sizeof(*file));
 	if (!file)
 		return &drgn_enomem;
-	file->module = module;
-	file->path = path;
-	file->elf = elf;
-	drgn_platform_from_elf(ehdr, &file->platform);
 
-	Elf_Scn *scn = NULL;
-	while ((scn = elf_nextscn(elf, scn))) {
-		GElf_Shdr shdr_mem, *shdr = gelf_getshdr(scn, &shdr_mem);
-		if (!shdr) {
+	if (ehdr->e_type == ET_EXEC ||
+	    ehdr->e_type == ET_DYN ||
+	    ehdr->e_type == ET_REL) {
+		size_t shstrndx;
+		if (elf_getshdrstrndx(elf, &shstrndx)) {
 			err = drgn_error_libelf();
 			goto err;
 		}
 
-		if (shdr->sh_type != SHT_PROGBITS)
-			continue;
+		bool has_sections = false;
+		bool has_alloc_section = false;
+		Elf_Scn *scn = NULL;
+		while ((scn = elf_nextscn(elf, scn))) {
+			GElf_Shdr shdr_mem, *shdr;
+			shdr = gelf_getshdr(scn, &shdr_mem);
+			if (!shdr) {
+				err = drgn_error_libelf();
+				goto err;
+			}
 
-		const char *scnname = elf_strptr(elf, shstrndx, shdr->sh_name);
-		if (!scnname) {
-			err = drgn_error_libelf();
-			goto err;
-		}
-		for (size_t i = 0; i < DRGN_SECTION_INDEX_NUM; i++) {
-			if (!file->scns[i] &&
-			    strcmp(scnname, drgn_section_index_names[i]) == 0) {
-				file->scns[i] = scn;
-				break;
+			has_sections = true;
+			if (shdr->sh_type != SHT_NOBITS &&
+			    shdr->sh_type != SHT_NOTE &&
+			    (shdr->sh_flags & SHF_ALLOC))
+				has_alloc_section = true;
+
+			if (shdr->sh_type != SHT_PROGBITS)
+				continue;
+			const char *scnname =
+				elf_strptr(elf, shstrndx, shdr->sh_name);
+			if (!scnname) {
+				err = drgn_error_libelf();
+				goto err;
+			}
+			for (size_t i = 0; i < DRGN_SECTION_INDEX_NUM; i++) {
+				if (!file->scns[i] &&
+				    strcmp(scnname,
+					   drgn_section_index_names[i]) == 0) {
+					file->scns[i] = scn;
+					break;
+				}
 			}
 		}
+		if (ehdr->e_type == ET_REL) {
+			// We consider a relocatable file "loadable" if it has
+			// any allocated sections.
+			file->is_loadable = has_alloc_section;
+		} else {
+			// We consider executable and shared object files
+			// loadable if they have any loadable segments, and
+			// either no sections or at least one allocated section.
+			bool has_loadable_segment = false;
+			size_t phnum;
+			if (elf_getphdrnum(elf, &phnum) != 0) {
+				err = drgn_error_libelf();
+				goto err;
+			}
+			for (size_t i = 0; i < phnum; i++) {
+				GElf_Phdr phdr_mem, *phdr =
+					gelf_getphdr(elf, i, &phdr_mem);
+				if (!phdr) {
+					err = drgn_error_libelf();
+					goto err;
+				}
+				if (phdr->p_type == PT_LOAD) {
+					has_loadable_segment = true;
+					break;
+				}
+			}
+			file->is_loadable =
+				has_loadable_segment &&
+				(!has_sections || has_alloc_section);
+		}
 	}
+
+	file->module = module;
+	file->path = strdup(path);
+	if (!file->path) {
+		err = &drgn_enomem;
+		goto err;
+	}
+	file->image = image;
+	file->fd = fd;
+	file->elf = elf;
+	drgn_platform_from_elf(ehdr, &file->platform);
 	*ret = file;
 	return NULL;
 
@@ -96,7 +157,15 @@ err:
 
 void drgn_elf_file_destroy(struct drgn_elf_file *file)
 {
-	free(file);
+	if (file) {
+		dwarf_end(file->dwarf);
+		elf_end(file->elf);
+		if (file->fd >= 0)
+			close(file->fd);
+		free(file->image);
+		free(file->path);
+		free(file);
+	}
 }
 
 static void truncate_null_terminated_section(Elf_Data *data)
@@ -130,7 +199,7 @@ struct drgn_error *drgn_elf_file_precache_sections(struct drgn_elf_file *file)
 	 */
 	truncate_null_terminated_section(file->scn_data[DRGN_SCN_DEBUG_STR]);
 	truncate_null_terminated_section(file->scn_data[DRGN_SCN_DEBUG_LINE_STR]);
-	truncate_null_terminated_section(file->alt_debug_str_data);
+	truncate_null_terminated_section(file->alt_debug_str_data); // TODO: ???
 	return NULL;
 }
 

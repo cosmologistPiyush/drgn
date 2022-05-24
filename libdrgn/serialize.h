@@ -149,6 +149,123 @@ void serialize_bits(void *buf, uint64_t bit_offset, uint64_t uvalue,
 uint64_t deserialize_bits(const void *buf, uint64_t bit_offset,
 			  uint8_t bit_size, bool little_endian);
 
+// TODO: document these
+// TODO: should these go in their own header instead?
+#include <byteswap.h>
+#include <stdint.h>
+#include <string.h>
+
+#define assign_member(member) do {			\
+	/* _src->member may be unaligned. */		\
+	typeof(_src->member) tmp;			\
+	memcpy(&tmp, &_src->member, sizeof(tmp));	\
+	_dst->member = tmp;				\
+} while (0)
+
+#define bswap_member(member) do {				\
+	_Static_assert(sizeof(_src->member) == 8 ||		\
+		       sizeof(_src->member) == 4 ||		\
+		       sizeof(_src->member) == 2 ||		\
+		       sizeof(_src->member) == 1,		\
+		       "scalar member has invalid size");	\
+	typeof(_src->member) swapped;				\
+	if (sizeof(_src->member) == 8) {			\
+		uint64_t x;					\
+		memcpy(&x, &_src->member, sizeof(x));		\
+		x = bswap_64(x);				\
+		memcpy(&swapped, &x, sizeof(x));		\
+	} else if (sizeof(_src->member) == 4) {			\
+		uint32_t x;					\
+		memcpy(&x, &_src->member, sizeof(x));		\
+		x = bswap_32(x);				\
+		memcpy(&swapped, &x, sizeof(x));		\
+	} else if (sizeof(_src->member) == 2) {			\
+		uint16_t x;					\
+		memcpy(&x, &_src->member, sizeof(x));		\
+		x = bswap_16(x);				\
+		memcpy(&swapped, &x, sizeof(x));		\
+	} else {						\
+		swapped = _src->member;				\
+	}							\
+	_dst->member = swapped;					\
+} while (0)
+
+#define bswap_member_in_place(member) do {			\
+	_Static_assert(sizeof(_dst->member) == 8 ||		\
+		       sizeof(_dst->member) == 4 ||		\
+		       sizeof(_dst->member) == 2 ||		\
+		       sizeof(_dst->member) == 1,		\
+		       "scalar member has invalid size");	\
+	if (sizeof(_dst->member) == 8) {			\
+		uint64_t x;					\
+		memcpy(&x, &_dst->member, sizeof(x));		\
+		x = bswap_64(x);				\
+		memcpy(&_dst->member, &x, sizeof(x));		\
+	} else if (sizeof(_dst->member) == 4) {			\
+		uint32_t x;					\
+		memcpy(&x, &_dst->member, sizeof(x));		\
+		x = bswap_32(x);				\
+		memcpy(&_dst->member, &x, sizeof(x));		\
+	} else if (sizeof(_dst->member) == 2) {			\
+		uint16_t x;					\
+		memcpy(&x, &_dst->member, sizeof(x));		\
+		x = bswap_16(x);				\
+		memcpy(&_dst->member, &x, sizeof(x));		\
+	}							\
+} while (0)
+
+#define ignore_member(member)
+
+#define memcpy_member(member) do {						\
+	_Static_assert(sizeof(_dst->member) == sizeof(_src->member),		\
+		       "64-bit and 32-bit members have different sizes");	\
+	memcpy(&_dst->member, &_src->member, sizeof(_dst->member));		\
+} while (0)
+
+#define copy_struct64(struct64p, buf, type32, visit_members, is_64_bit, bswap)	\
+do {										\
+	__auto_type _dst = (struct64p);						\
+	const void *_buf = (buf);						\
+	bool _is_64_bit = (is_64_bit);						\
+	bool _bswap = (bswap);							\
+	if (_is_64_bit && !_bswap) {						\
+		memcpy(_dst, buf, sizeof(*_dst));				\
+	} else if (_is_64_bit /* && _bswap */) {				\
+		typeof(_dst) _src = (void *)_buf;				\
+		visit_members(bswap_member, memcpy_member);			\
+	} else if (/* !_is_64_bit && */ !_bswap) {				\
+		typeof(type32) *_src = (void *)_buf;				\
+		visit_members(assign_member, memcpy_member);			\
+	} else /* if (!_is_64_bit && _bswap) */ {				\
+		typeof(type32) *_src = (void *)_buf;				\
+		visit_members(bswap_member, memcpy_member);			\
+	}									\
+} while (0)
+
+#define to_struct64(struct64p, type32, visit_members, is_64_bit, bswap) do {	\
+	__auto_type _struct64p = (struct64p);					\
+	bool _is_64_bit = (is_64_bit);						\
+	bool _bswap = (bswap);							\
+	if (_is_64_bit && !_bswap) {						\
+		/* It's already what we want. */				\
+	} else if (_is_64_bit /* && _bswap */) {				\
+		__auto_type _dst = _struct64p;					\
+		visit_members(bswap_member_in_place, ignore_member);		\
+	} else if (/* !_is_64_bit && */ !_bswap) {				\
+		typeof(*_struct64p) _tmp;					\
+		__auto_type _dst = &_tmp;					\
+		typeof(_dst) _src = (void *)_struct64p;				\
+		visit_members(assign_member, memcpy_member);			\
+		memcpy(_struct64p, _dst, sizeof(*_struct64p));			\
+	} else /* if (!_is_64_bit && _bswap) */ {				\
+		typeof(*_struct64p) _tmp;					\
+		__auto_type _dst = &_tmp;					\
+		typeof(_dst) _src = (void *)_struct64p;				\
+		visit_members(bswap_member, memcpy_member);			\
+		memcpy(_struct64p, _dst, sizeof(*_struct64p));			\
+	}									\
+} while (0)
+
 /** @} */
 
 #endif /* DRGN_SERIALIZE_H */

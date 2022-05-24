@@ -6,7 +6,8 @@
 
 #include "drgn.h"
 
-struct drgn_debug_info_load_state;
+struct depmod_index;
+struct drgn_module_try_files_state;
 
 struct drgn_error *read_memory_via_pgtable(void *buf, uint64_t address,
 					   size_t count, uint64_t offset,
@@ -26,8 +27,19 @@ struct drgn_error *linux_kernel_object_find(const char *name, size_t name_len,
 					    enum drgn_find_object_flags flags,
 					    void *arg, struct drgn_object *ret);
 
+void depmod_index_deinit(struct depmod_index *depmod);
+
 struct drgn_error *
-linux_kernel_report_debug_info(struct drgn_debug_info_load_state *load);
+linux_kernel_loaded_module_iterator_create(struct drgn_program *prog,
+					   struct drgn_module_iterator **ret);
+
+struct drgn_error *
+drgn_module_try_vmlinux_files(struct drgn_module *module,
+			      struct drgn_module_try_files_state *state);
+
+struct drgn_error *
+drgn_module_try_linux_kmod_files(struct drgn_module *module,
+				 struct drgn_module_try_files_state *state);
 
 #define KDUMP_SIGNATURE "KDUMP   "
 #define KDUMP_SIG_LEN (sizeof(KDUMP_SIGNATURE) - 1)

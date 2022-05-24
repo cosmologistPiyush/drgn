@@ -120,6 +120,7 @@ def main() -> None:
         help="don't load any debugging symbols that were not explicitly added with -s",
     )
 
+    parser.add_argument("--log-level", type=int, help="TODO")
     parser.add_argument(
         "-q",
         "--quiet",
@@ -160,6 +161,8 @@ def main() -> None:
         os.environ["DEBUGINFOD_PROGRESS"] = "1"
 
     prog = drgn.Program()
+    if args.log_level is not None:
+        prog.log_level = args.log_level
     try:
         if args.core is not None:
             prog.set_core_dump(args.core)

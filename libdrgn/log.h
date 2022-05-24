@@ -47,6 +47,9 @@ enum drgn_log_level {
  * @name Logging Functions
  */
 
+// TODO
+bool drgn_should_log(struct drgn_program *prog, enum drgn_log_level level);
+
 #ifdef DOXYGEN
 /** Log a printf-style message at the given level. */
 void drgn_log(enum drgn_log_level level, struct drgn_program *prog,

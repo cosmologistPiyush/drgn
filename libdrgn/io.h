@@ -24,4 +24,7 @@ ssize_t read_all(int fd, void *buf, size_t count);
  */
 ssize_t pread_all(int fd, void *buf, size_t count, off_t offset);
 
+// TODO
+int write_all(int fd, const void *buf, size_t count);
+
 #endif /* DRGN_IO_H */

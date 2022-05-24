@@ -48,3 +48,18 @@ ssize_t pread_all(int fd, void *buf, size_t count, off_t offset)
 	}
 	return n;
 }
+
+int write_all(int fd, const void *buf, size_t count)
+{
+	while (count > 0) {
+		ssize_t r = write(fd, buf, count);
+		if (r < 0) {
+			if (errno == EINTR)
+				continue;
+			return r;
+		}
+		buf += r;
+		count -= r;
+	}
+	return 0;
+}

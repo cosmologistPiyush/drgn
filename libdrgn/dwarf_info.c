@@ -310,7 +310,8 @@ struct drgn_dwarf_index_pending_cu {
 	enum drgn_section_index scn;
 };
 
-DEFINE_VECTOR_FUNCTIONS(drgn_dwarf_index_pending_cu_vector)
+DEFINE_VECTOR(drgn_dwarf_index_pending_cu_vector,
+	      struct drgn_dwarf_index_pending_cu)
 
 /**
  * DWARF abbreviation table instructions.
@@ -482,34 +483,11 @@ drgn_namespace_dwarf_index_alloc_shards(struct drgn_namespace_dwarf_index *dinde
 	return true;
 }
 
-bool drgn_dwarf_index_state_init(struct drgn_dwarf_index_state *state,
-				 struct drgn_debug_info *dbinfo)
-{
-	state->dbinfo = dbinfo;
-	state->max_threads = omp_get_max_threads();
-	state->cus = malloc_array(state->max_threads, sizeof(*state->cus));
-	if (!state->cus)
-		return false;
-	for (size_t i = 0; i < state->max_threads; i++)
-		drgn_dwarf_index_pending_cu_vector_init(&state->cus[i]);
-	return true;
-}
-
-void drgn_dwarf_index_state_deinit(struct drgn_dwarf_index_state *state)
-{
-	for (size_t i = 0; i < state->max_threads; i++)
-		drgn_dwarf_index_pending_cu_vector_deinit(&state->cus[i]);
-	free(state->cus);
-}
-
 static struct drgn_error *
-drgn_dwarf_index_read_cus(struct drgn_dwarf_index_state *state,
-			  struct drgn_elf_file *file,
-			  enum drgn_section_index scn)
+drgn_dwarf_index_read_cus(struct drgn_elf_file *file,
+			  enum drgn_section_index scn,
+			  struct drgn_dwarf_index_pending_cu_vector *cus)
 {
-	struct drgn_dwarf_index_pending_cu_vector *cus =
-		&state->cus[omp_get_thread_num()];
-
 	struct drgn_error *err;
 	struct drgn_elf_file_section_buffer buffer;
 	drgn_elf_file_section_buffer_init_index(&buffer, file, scn);
@@ -543,15 +521,20 @@ drgn_dwarf_index_read_cus(struct drgn_dwarf_index_state *state,
 }
 
 struct drgn_error *
-drgn_dwarf_index_read_module(struct drgn_dwarf_index_state *state,
-			     struct drgn_module *module)
+drgn_dwarf_index_read_module(struct drgn_module *module,
+			     struct drgn_dwarf_index_pending_cu_vector *cus)
 {
 	struct drgn_error *err;
 	struct drgn_elf_file *file = module->debug_file;
-	err = drgn_dwarf_index_read_cus(state, file, DRGN_SCN_DEBUG_INFO);
+	// TODO: is this the right place to do this?
+	// TODO: apply relocations
+	err = drgn_elf_file_precache_sections(file);
+	if (err)
+		return err;
+	err = drgn_dwarf_index_read_cus(file, DRGN_SCN_DEBUG_INFO, cus);
 	if (!err && file->scn_data[DRGN_SCN_DEBUG_TYPES]) {
-		err = drgn_dwarf_index_read_cus(state, file,
-						DRGN_SCN_DEBUG_TYPES);
+		err = drgn_dwarf_index_read_cus(file, DRGN_SCN_DEBUG_TYPES,
+						cus);
 	}
 	return err;
 }
@@ -2761,7 +2744,8 @@ next:
 	return NULL;
 }
 
-static void drgn_dwarf_index_rollback(struct drgn_debug_info *dbinfo)
+#if 0
+static void drgn_dwarf_index_rollback(struct drgn_debug_info *dbinfo) // TODO
 {
 	for (size_t i = 0; i < DRGN_DWARF_INDEX_NUM_SHARDS; i++) {
 		struct drgn_dwarf_index_shard *shard =
@@ -2774,8 +2758,7 @@ static void drgn_dwarf_index_rollback(struct drgn_debug_info *dbinfo)
 		while (shard->dies.size) {
 			struct drgn_dwarf_index_die *die =
 				&shard->dies.data[shard->dies.size - 1];
-			if (die->file->module->state ==
-			    DRGN_DEBUG_INFO_MODULE_INDEXED)
+			if (die->file->module->debug_file_committed)
 				break;
 			if (die->tag == DW_TAG_namespace) {
 				drgn_namespace_dwarf_index_deinit(die->namespace);
@@ -2814,8 +2797,7 @@ static void drgn_dwarf_index_rollback(struct drgn_debug_info *dbinfo)
 	for (struct drgn_dwarf_specification_map_iterator it =
 	     drgn_dwarf_specification_map_first(&dbinfo->dwarf.specifications);
 	     it.entry; ) {
-		if (it.entry->file->module->state ==
-		    DRGN_DEBUG_INFO_MODULE_INDEXED) {
+		if (it.entry->file->module->debug_file_committed) {
 			it = drgn_dwarf_specification_map_next(it);
 		} else {
 			it = drgn_dwarf_specification_map_delete_iterator(&dbinfo->dwarf.specifications,
@@ -2823,41 +2805,71 @@ static void drgn_dwarf_index_rollback(struct drgn_debug_info *dbinfo)
 		}
 	}
 }
+#endif
 
-struct drgn_error *
-drgn_dwarf_info_update_index(struct drgn_dwarf_index_state *state)
+static struct drgn_error *
+index_global_namespace(struct drgn_debug_info *dbinfo)
 {
-	struct drgn_debug_info *dbinfo = state->dbinfo;
-	struct drgn_dwarf_index_cu_vector *cus = &dbinfo->dwarf.index_cus;
+	if (dbinfo->modules_pending_indexing.size == 0)
+		return NULL;
 
 	if (!drgn_namespace_dwarf_index_alloc_shards(&dbinfo->dwarf.global))
 		return &drgn_enomem;
 
+	struct drgn_dwarf_index_cu_vector *cus = &dbinfo->dwarf.index_cus;
 	size_t old_cus_size = cus->size;
-	size_t new_cus_size = old_cus_size;
-	for (size_t i = 0; i < state->max_threads; i++)
-		new_cus_size += state->cus[i].size;
-	if (!drgn_dwarf_index_cu_vector_reserve(cus, new_cus_size))
-		return &drgn_enomem;
-	for (size_t i = 0; i < state->max_threads; i++) {
-		for (size_t j = 0; j < state->cus[i].size; j++) {
-			struct drgn_dwarf_index_pending_cu *pending_cu =
-				&state->cus[i].data[j];
-			cus->data[cus->size++] = (struct drgn_dwarf_index_cu){
-				.file = pending_cu->file,
-				.buf = pending_cu->buf,
-				.len = pending_cu->len,
-				.is_64_bit = pending_cu->is_64_bit,
-				.scn = pending_cu->scn,
-				.file_name_hashes =
-					(uint64_t *)no_file_name_hashes,
-				.num_file_names =
-					array_size(no_file_name_hashes),
-			};
-		}
-	}
 
 	struct drgn_error *err = NULL;
+	#pragma omp parallel
+	{
+		struct drgn_dwarf_index_pending_cu_vector pending_cus = VECTOR_INIT;
+
+		#pragma omp for schedule(dynamic) nowait
+		for (size_t i = 0; i < dbinfo->modules_pending_indexing.size; i++) {
+			if (err)
+				continue;
+			struct drgn_error *module_err =
+				drgn_dwarf_index_read_module(dbinfo->modules_pending_indexing.data[i],
+							     &pending_cus);
+			if (module_err) {
+				#pragma omp critical(drgn_dwarf_index_read_modules)
+				if (err)
+					drgn_error_destroy(module_err);
+				else
+					err = module_err;
+			}
+		}
+
+		#pragma omp critical(drgn_dwarf_index_read_modules)
+		if (!err) {
+			for (size_t i = 0; i < pending_cus.size; i++) {
+				struct drgn_dwarf_index_pending_cu *pending_cu =
+					&pending_cus.data[i];
+				struct drgn_dwarf_index_cu *cu =
+					drgn_dwarf_index_cu_vector_append_entry(cus);
+				if (!cu) {
+					err = &drgn_enomem;
+					break;
+				}
+				*cu = (struct drgn_dwarf_index_cu){
+					.file = pending_cu->file,
+					.buf = pending_cu->buf,
+					.len = pending_cu->len,
+					.is_64_bit = pending_cu->is_64_bit,
+					.scn = pending_cu->scn,
+					.file_name_hashes =
+						(uint64_t *)no_file_name_hashes,
+					.num_file_names =
+						array_size(no_file_name_hashes),
+				};
+			}
+		}
+
+		drgn_dwarf_index_pending_cu_vector_deinit(&pending_cus);
+	}
+	if (err)
+		goto err;
+
 	#pragma omp parallel
 	{
 		struct path_hash_cache path_hash_cache;
@@ -2922,18 +2934,22 @@ drgn_dwarf_info_update_index(struct drgn_dwarf_index_state *state)
 				err = cu_err;
 		}
 	}
-	if (err) {
-		drgn_dwarf_index_rollback(dbinfo);
+	if (err)
+		goto err;
+
+	dbinfo->modules_pending_indexing.size = 0;
+	// TODO: drgn_module_vector_shrink_to_fit(&dbinfo->modules_pending_indexing);
+
 err:
-		for (size_t i = old_cus_size; i < cus->size; i++)
-			drgn_dwarf_index_cu_deinit(&cus->data[i]);
-		cus->size = old_cus_size;
-	}
-	return err;
+	return err; // TODO
 }
 
 static struct drgn_error *index_namespace(struct drgn_namespace_dwarf_index *ns)
 {
+	struct drgn_error *err = index_global_namespace(ns->dbinfo);
+	if (err)
+		return err;
+
 	if (ns->pending_dies.size == 0)
 		return NULL;
 
@@ -2943,7 +2959,7 @@ static struct drgn_error *index_namespace(struct drgn_namespace_dwarf_index *ns)
 	if (!drgn_namespace_dwarf_index_alloc_shards(ns))
 		return &drgn_enomem;
 
-	struct drgn_error *err = NULL;
+	err = NULL;
 	#pragma omp parallel for schedule(dynamic)
 	for (size_t i = 0; i < ns->pending_dies.size; i++) {
 		if (!err) {
@@ -5173,17 +5189,17 @@ absent:
 		drgn_object_reinit(ret, &type, DRGN_OBJECT_ABSENT);
 		err = NULL;
 	} else if (bit_offset >= 0) {
-		Dwarf_Addr start, end, bias;
-		dwfl_module_info(file->module->dwfl_module, NULL, &start, &end,
-				 &bias, NULL, NULL, NULL);
 		/*
 		 * If the address is not in the module's address range, then
 		 * it's probably something special like a Linux per-CPU variable
 		 * (which isn't actually a variable address but an offset).
 		 * Don't apply the bias in that case.
 		 */
-		if (start <= address + bias && address + bias < end)
-			address += bias;
+		uint64_t biased_address =
+			address + file->module->debug_file_bias;
+		if (file->module->start <= biased_address &&
+		    biased_address < file->module->end)
+			address = biased_address;
 		err = drgn_object_set_reference_internal(ret, &type, address,
 							 bit_offset);
 	} else if (type.encoding == DRGN_OBJECT_ENCODING_BUFFER) {
@@ -7920,7 +7936,6 @@ drgn_find_dwarf_cfi(struct drgn_dwarf_cfi *cfi, bool *parsed,
 			return err;
 		*parsed = true;
 	}
-
 	struct drgn_dwarf_fde *fde = drgn_find_dwarf_fde(cfi, unbiased_pc);
 	if (!fde)
 		return &drgn_not_found;
@@ -7933,6 +7948,7 @@ drgn_find_dwarf_cfi(struct drgn_dwarf_cfi *cfi, bool *parsed,
 	return NULL;
 }
 
+// TODO: benchmark before and after
 struct drgn_error *
 drgn_module_find_dwarf_cfi(struct drgn_module *module, uint64_t pc,
 			   struct drgn_cfi_row **row_ret, bool *interrupted_ret,

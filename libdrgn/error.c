@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
 #include <elfutils/libdw.h>
-#include <elfutils/libdwfl.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <libelf.h>
@@ -264,10 +263,4 @@ struct drgn_error *drgn_error_libdw(void)
 {
 	return drgn_error_format(DRGN_ERROR_OTHER, "libdw error: %s",
 				 dwarf_errmsg(-1));
-}
-
-struct drgn_error *drgn_error_libdwfl(void)
-{
-	return drgn_error_format(DRGN_ERROR_OTHER, "libdwfl error: %s",
-				 dwfl_errmsg(-1));
 }

@@ -26,6 +26,7 @@
 #include "vector.h"
 
 struct drgn_debug_info;
+struct drgn_debug_info_module; // TODO: remove (and anywhere else it remains)
 struct drgn_module;
 struct drgn_register_state;
 
@@ -33,13 +34,12 @@ struct drgn_register_state;
 struct drgn_dwarf_fde {
 	uint64_t initial_location;
 	uint64_t address_range;
-	/* CIE for this FDE as an index into drgn_dwarf_cfi::cies. */
+	/* CIE for this FDE as an index into drgn_debug_info_module::cies. */
 	size_t cie;
 	const char *instructions;
 	size_t instructions_size;
 };
 
-/** DWARF Call Frame Information. */
 struct drgn_dwarf_cfi {
 	/** Array of DWARF Common Information Entries. */
 	struct drgn_dwarf_cie *cies;
@@ -51,7 +51,7 @@ struct drgn_dwarf_cfi {
 	size_t num_fdes;
 };
 
-/** DWARF debugging information for a @ref drgn_module. */
+/** DWARF debugging information for a @ref drgn_debug_info_module. */
 struct drgn_module_dwarf_info {
 	/** Call Frame Information from .debug_frame. */
 	struct drgn_dwarf_cfi debug_frame;
@@ -164,44 +164,6 @@ struct drgn_dwarf_info {
 
 void drgn_dwarf_info_init(struct drgn_debug_info *dbinfo);
 void drgn_dwarf_info_deinit(struct drgn_debug_info *dbinfo);
-
-DEFINE_VECTOR_TYPE(drgn_dwarf_index_pending_cu_vector,
-		   struct drgn_dwarf_index_pending_cu)
-
-/**
- * State tracked while indexing new DWARF information in a @ref drgn_dwarf_info.
- */
-struct drgn_dwarf_index_state {
-	struct drgn_debug_info *dbinfo;
-	/** Per-thread arrays of CUs to be indexed. */
-	struct drgn_dwarf_index_pending_cu_vector *cus;
-	size_t max_threads;
-};
-
-/**
- * Initialize state for indexing new DWARF information.
- *
- * @return @c true on success, @c false on failure to allocate memory.
- */
-bool drgn_dwarf_index_state_init(struct drgn_dwarf_index_state *state,
-				 struct drgn_debug_info *dbinfo);
-
-/** Deinitialize state for indexing new DWARF information. */
-void drgn_dwarf_index_state_deinit(struct drgn_dwarf_index_state *state);
-
-/** Read a @ref drgn_module to index its DWARF information. */
-struct drgn_error *
-drgn_dwarf_index_read_module(struct drgn_dwarf_index_state *state,
-			     struct drgn_module *module);
-
-/**
- * Index new DWARF information.
- *
- * This should be called once all modules have been read with @ref
- * drgn_dwarf_index_read_module() to finish indexing those modules.
- */
-struct drgn_error *
-drgn_dwarf_info_update_index(struct drgn_dwarf_index_state *state);
 
 /**
  * Find the DWARF DIEs in a @ref drgn_module for the scope containing a given
