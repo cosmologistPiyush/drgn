@@ -33,7 +33,10 @@ class _GitHubApiBase:
             "User-Agent": "osandov/drgn vmtest",
         }
         if token is not None:
+            print(">>> SETTING Authorization")
             self._headers["Authorization"] = "token " + token
+        else:
+            print(">>> NOT setting Authorization")
 
     def _request(
         self,
