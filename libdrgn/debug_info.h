@@ -66,8 +66,7 @@ struct drgn_debug_info {
 #endif
 	struct drgn_module *main_module; // TODO: document
 	struct drgn_module_table modules; // TODO: document
-	// TODO: document (isn't ::modules also "by address")?
-	struct drgn_module_address_tree modules_by_address;
+	struct drgn_module_address_tree modules_by_address; // TODO: document
 	struct drgn_module_vector modules_pending_indexing;
 	/** DWARF debugging information. */
 	struct drgn_dwarf_info dwarf;
@@ -110,15 +109,6 @@ static inline bool drgn_error_should_log(struct drgn_error *err)
 }
 
 DEFINE_HASH_MAP_TYPE(drgn_module_section_address_map, char *, uint64_t)
-
-struct drgn_module_trying_gnu_debugaltlink {
-	struct drgn_elf_file *debug_file;
-	const char *debugaltlink_path;
-	const void *build_id;
-	size_t build_id_len;
-	char *build_id_str;
-	struct drgn_elf_file *found;
-};
 
 // TODO: document
 // TODO: think about order
@@ -192,7 +182,6 @@ struct drgn_module {
 	struct drgn_module_section_address_map section_addresses;
 
 	struct drgn_module_trying_gnu_debugaltlink *trying_gnu_debugaltlink;
-	struct drgn_module *next; // TODO: don't need this anymore, I think
 };
 
 struct drgn_error *drgn_module_find_or_create(struct drgn_program *prog,

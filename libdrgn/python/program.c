@@ -488,41 +488,24 @@ static ModuleIterator *Program_loaded_modules(Program *self)
 	return it;
 }
 
-static PyObject *Program_find_module(Program *self, const struct drgn_module_key *key)
-{
-	struct drgn_module *module = drgn_module_find(&self->prog, key);
-	if (!module) {
-		PyErr_SetString(PyExc_LookupError, "module not found");
-		return NULL;
-	}
-	return Module_wrap(module);
-}
-
 static PyObject *Program_main_module(Program *self, PyObject *args,
 				     PyObject *kwds)
 {
 	struct drgn_error *err;
 	static char *keywords[] = {"name", NULL};
-	struct path_arg name = { .allow_none = true };
-	if (!PyArg_ParseTupleAndKeywords(args, kwds, "|O&:main_module", keywords,
+	struct path_arg name = {};
+	if (!PyArg_ParseTupleAndKeywords(args, kwds, "O&:main_module", keywords,
 					 path_converter, &name))
 		return NULL;
-
-	if (name.path) {
-		struct drgn_module *module;
-		err = drgn_module_find_or_create_main(&self->prog, name.path, &module,
-						      NULL);
-		path_cleanup(&name);
-		if (err) {
-			set_drgn_error(err);
-			return NULL;
-		}
-		return Module_wrap(module);
-	} else {
-		path_cleanup(&name);
-		struct drgn_module_key key = { .kind = DRGN_MODULE_MAIN };
-		return Program_find_module(self, &key);
+	struct drgn_module *module;
+	err = drgn_module_find_or_create_main(&self->prog, name.path, &module,
+					      NULL);
+	path_cleanup(&name);
+	if (err) {
+		set_drgn_error(err);
+		return NULL;
 	}
+	return Module_wrap(module);
 }
 
 static PyObject *Program_shared_library_module(Program *self, PyObject *args,
@@ -624,6 +607,22 @@ static PyObject *Program_extra_module(Program *self, PyObject *args,
 		return NULL;
 	}
 	return Module_wrap(module);
+}
+
+static PyObject *Program_find_module(Program *self, const struct drgn_module_key *key)
+{
+	struct drgn_module *module = drgn_module_find(&self->prog, key);
+	if (!module) {
+		PyErr_SetString(PyExc_LookupError, "module not found");
+		return NULL;
+	}
+	return Module_wrap(module);
+}
+
+static PyObject *Program_find_main_module(Program *self)
+{
+	struct drgn_module_key key = { .kind = DRGN_MODULE_MAIN };
+	return Program_find_module(self, &key);
 }
 
 static PyObject *Program_find_shared_library_module(Program *self,
@@ -771,7 +770,8 @@ static PyObject *Program_load_debug_info(Program *self, PyObject *args,
 		for (size_t i = 0; i < path_args.size; i++)
 			paths[i] = path_args.data[i].path;
 	}
-	err = drgn_program_load_debug_info(&self->prog); /* TODO */
+	err = drgn_program_load_debug_info(&self->prog, paths, path_args.size,
+					   load_default, load_main);
 	free(paths);
 	if (err)
 		set_drgn_error(err);
@@ -789,7 +789,7 @@ static PyObject *Program_load_default_debug_info(Program *self)
 {
 	struct drgn_error *err;
 
-	err = drgn_program_load_debug_info(&self->prog); /* TODO */
+	err = drgn_program_load_debug_info(&self->prog, NULL, 0, true, true);
 	if (err)
 		return set_drgn_error(err);
 	Py_RETURN_NONE;
@@ -1301,6 +1301,8 @@ static PyMethodDef Program_methods[] = {
 	 drgn_Program_linux_kernel_loadable_module_DOC},
 	{"extra_module", (PyCFunction)Program_extra_module,
 	 METH_VARARGS | METH_KEYWORDS, drgn_Program_extra_module_DOC},
+	{"find_main_module", (PyCFunction)Program_find_main_module, METH_NOARGS,
+	 drgn_Program_find_main_module_DOC},
 	{"find_shared_library_module",
 	 (PyCFunction)Program_find_shared_library_module,
 	 METH_VARARGS | METH_KEYWORDS,

@@ -36,6 +36,27 @@
 #include "serialize.h"
 #include "util.h"
 
+DEFINE_HASH_MAP_FUNCTIONS(drgn_module_section_address_map,
+			  c_string_key_hash_pair, c_string_key_eq)
+
+struct drgn_module_trying_gnu_debugaltlink {
+	struct drgn_elf_file *debug_file;
+	const char *debugaltlink_path;
+	const void *build_id;
+	size_t build_id_len;
+	char *build_id_str;
+	struct drgn_elf_file *found;
+};
+
+#if !_ELFUTILS_PREREQ(0, 175)
+// If we don't have dwelf_elf_begin(), this is equivalent except that it doesn't
+// handle compressed files.
+static inline Elf *dwelf_elf_begin(int fd)
+{
+	return elf_begin(fd, ELF_C_READ_MMAP_PRIVATE, NULL);
+}
+#endif
+
 #if WITH_DEBUGINFOD
 
 #if _ELFUTILS_PREREQ(0, 179)
@@ -106,9 +127,6 @@ static inline bool drgn_have_debuginfod(void)
 #undef DRGN_DEBUGINFOD_FUNCTIONS
 #undef DRGN_DEBUGINFOD_0_179_FUNCTIONS
 #endif
-
-DEFINE_HASH_MAP_FUNCTIONS(drgn_module_section_address_map,
-			  c_string_key_hash_pair, c_string_key_eq)
 
 static inline
 struct drgn_module_key drgn_module_entry_key(struct drgn_module * const *entry)
@@ -715,8 +733,6 @@ drgn_module_maybe_use_elf_file(struct drgn_module *module,
 	// TODO:
 	// - Copy section addresses
 	// - Get bias
-	// - Get address range
-	// - Get build ID
 #if 0
 	if ((prog->flags & DRGN_PROGRAM_IS_LINUX_KERNEL) &&
 	    module->kind == DRGN_MODULE_MAIN) {
@@ -736,10 +752,8 @@ drgn_module_maybe_use_elf_file(struct drgn_module *module,
 		}
 	}
 	if (use_debug) {
-		// TODO: update
 		// If the file has .gnu_debugaltlink, find it before we use the
-		// file. Note that it doesn't make sense for a .gnu_debugaltlink
-		// file to have a .gnu_debugaltlink itself.
+		// file. TODO
 		if (module->trying_gnu_debugaltlink) {
 			drgn_log_info(prog, "using gnu_debugaltlink file %s\n",
 				      file->path);
@@ -825,12 +839,7 @@ drgn_module_try_file_internal(struct drgn_module *module,
 		drgn_log_debug(prog, "trying %s\n", path);
 	}
 
-	Elf *elf;
-#if _ELFUTILS_PREREQ(0, 175)
-	elf = dwelf_elf_begin(fd);
-#else
-	elf = elf_begin(fd, ELF_C_READ_MMAP_PRIVATE, NULL);
-#endif
+	Elf *elf = dwelf_elf_begin(fd);
 	if (!elf) {
 		drgn_log_debug(prog, "%s: %s\n", path, elf_errmsg(-1));
 		err = NULL;
@@ -1881,6 +1890,7 @@ drgn_module_try_download_files_internal(struct drgn_module *module,
 {
 	struct drgn_error *err;
 
+	// TODO: I don't like that this prints when it's cached
 	drgn_module_try_files_log(module, state, "downloading");
 
 	// TODO: what's up with ctrl-C?
@@ -4631,6 +4641,294 @@ drgn_loaded_module_iterator_create(struct drgn_program *prog,
 		return core_loaded_module_iterator_create(prog, ret);
 	else
 		return null_loaded_module_iterator_create(prog, ret);
+}
+
+struct load_debug_info_file {
+	const char *path;
+	Elf *elf;
+	int fd;
+};
+
+DEFINE_VECTOR(load_debug_info_file_vector, struct load_debug_info_file)
+
+struct load_debug_info_candidate {
+	const void *build_id;
+	size_t build_id_len;
+	struct load_debug_info_file_vector files;
+	bool matched;
+};
+
+static struct nstring
+load_debug_info_candidate_key(const struct load_debug_info_candidate *candidate)
+{
+	return (struct nstring){ candidate->build_id, candidate->build_id_len };
+}
+
+DEFINE_HASH_TABLE(load_debug_info_candidate_table,
+		  struct load_debug_info_candidate,
+		  load_debug_info_candidate_key, nstring_hash_pair, nstring_eq);
+
+struct load_debug_info_state {
+	struct drgn_program *prog;
+	struct load_debug_info_candidate_table candidates;
+	// Number of entries in the candidates table that haven't matched any
+	// modules.
+	size_t unmatched_candidates;
+	bool load_default;
+	bool load_main;
+};
+
+static struct drgn_error *
+load_debug_info_add_candidate(struct load_debug_info_state *state,
+			      const char *path)
+{
+	struct drgn_error *err;
+	struct drgn_program *prog = state->prog;
+
+	struct load_debug_info_file file = {
+		.path = path,
+		.fd = open(path, O_RDONLY),
+	};
+	if (file.fd < 0) {
+		drgn_log_warning(prog, "%s: %m; ignoring\n", path);
+		return NULL;
+	}
+	file.elf = dwelf_elf_begin(file.fd);
+	if (!file.elf) {
+		drgn_log_warning(prog, "%s: %s; ignoring\n", path,
+				 elf_errmsg(-1));
+		err = NULL;
+		goto err_fd;
+	}
+	if (elf_kind(file.elf) != ELF_K_ELF) {
+		drgn_log_warning(prog, "%s: not an ELF file; ignoring\n", path);
+		err = NULL;
+		goto err_elf;
+	}
+	const void *build_id;
+	ssize_t build_id_len = dwelf_elf_gnu_build_id(file.elf, &build_id);
+	if (build_id_len <= 0) {
+		if (build_id_len < 0) {
+			drgn_log_warning(prog, "%s: %s; ignoring\n", path,
+					 elf_errmsg(-1));
+		} else {
+			drgn_log_warning(prog, "%s: no build ID; ignoring\n",
+					 path);
+		}
+		err = NULL;
+		goto err_elf;
+	}
+
+	struct load_debug_info_candidate candidate = {
+		.build_id = build_id,
+		.build_id_len = build_id_len,
+	};
+	struct load_debug_info_candidate_table_iterator it;
+	int r = load_debug_info_candidate_table_insert(&state->candidates,
+						       &candidate, &it);
+	if (r < 0) {
+		err = &drgn_enomem;
+		goto err_elf;
+	}
+	if (r > 0) {
+		load_debug_info_file_vector_init(&it.entry->files);
+		state->unmatched_candidates++;
+	}
+	if (!load_debug_info_file_vector_append(&it.entry->files, &file)) {
+		err = &drgn_enomem;
+		goto err_elf;
+	}
+	return NULL;
+
+err_elf:
+	elf_end(file.elf);
+err_fd:
+	close(file.fd);
+	return err;
+}
+
+static void load_debug_info_state_deinit(struct load_debug_info_state *state)
+{
+	for (struct load_debug_info_candidate_table_iterator it =
+	     load_debug_info_candidate_table_first(&state->candidates);
+	     it.entry;
+	     it = load_debug_info_candidate_table_next(it)) {
+		for (size_t i = 0; i < it.entry->files.size; i++) {
+			elf_end(it.entry->files.data[i].elf);
+			close(it.entry->files.data[i].fd);
+		}
+		load_debug_info_file_vector_deinit(&it.entry->files);
+	}
+	load_debug_info_candidate_table_deinit(&state->candidates);
+}
+
+static struct drgn_error *
+load_debug_info_try_files(struct drgn_module *module,
+			  const void *build_id, size_t build_id_len,
+			  struct drgn_module_try_files_args *args,
+			  bool *missing_debug_info_error_ret)
+{
+	struct drgn_error *err;
+	struct load_debug_info_state *state = args->arg;
+
+	*missing_debug_info_error_ret = false;
+
+	struct nstring key = { build_id, build_id_len };
+	struct load_debug_info_candidate *candidate;
+	if (build_id_len > 0 &&
+	    (candidate =
+	     load_debug_info_candidate_table_search(&state->candidates,
+						    &key).entry)) {
+		if (!candidate->matched) {
+			state->unmatched_candidates--;
+			candidate->matched = true;
+		}
+		for (size_t i = 0; i < candidate->files.size; i++) {
+			struct load_debug_info_file *file =
+				&candidate->files.data[i];
+			// TODO: reopen fd through proc? provide Elf handle?
+			err = drgn_module_try_file(module, file->path, -1,
+						   false, args);
+			if (err)
+				return err;
+			if (args->loaded_status != DRGN_MODULE_FILE_FAILED &&
+			    args->debug_status != DRGN_MODULE_FILE_FAILED)
+				return NULL;
+		}
+	}
+
+	if (state->load_default
+	    || (state->load_main
+		&& drgn_module_kind(module) == DRGN_MODULE_MAIN)) {
+		err = drgn_module_try_default_files(module, args);
+		if (err)
+			return err;
+		if (args->loaded_status == DRGN_MODULE_FILE_FAILED ||
+		    args->debug_status == DRGN_MODULE_FILE_FAILED)
+			*missing_debug_info_error_ret = true;
+	}
+	return NULL;
+}
+
+struct drgn_error *
+load_debug_info_need_gnu_debugaltlink_file(struct drgn_module *module,
+					   struct drgn_module_try_files_args *args,
+					   const char *debug_file_path,
+					   const char *debugaltlink_path,
+					   const void *build_id,
+					   size_t build_id_len,
+					   const char *build_id_str)
+{
+	bool unused;
+	return load_debug_info_try_files(module, build_id, build_id_len, args,
+					 &unused);
+}
+
+LIBDRGN_PUBLIC struct drgn_error *
+drgn_program_load_debug_info(struct drgn_program *prog, const char **paths,
+			     size_t n, bool load_default, bool load_main)
+{
+	struct drgn_error *err;
+
+	elf_version(EV_CURRENT); // TODO: get rid of this and create the debug
+				 // info earlier
+
+	struct load_debug_info_state state = {
+		.prog = prog,
+		.candidates = HASH_TABLE_INIT,
+		.load_default = load_default,
+		.load_main = load_main,
+	};
+	for (size_t i = 0; i < n; i++) {
+		err = load_debug_info_add_candidate(&state, paths[i]);
+		if (err)
+			goto out_state;
+	}
+
+	if (load_debug_info_candidate_table_empty(&state.candidates)
+	    && !load_default && !load_main) {
+		// We don't have any files to try, so don't create any modules.
+		err = NULL;
+		goto out_state;
+	}
+
+	struct drgn_module_iterator *it;
+	err = drgn_loaded_module_iterator_create(prog, &it);
+	if (err)
+		goto out_state;
+	struct drgn_module *module;
+	struct string_builder missing_debug_info_error_message =
+		STRING_BUILDER_INIT;
+	while (!(err = drgn_module_iterator_next(it, &module)) && module) {
+		struct drgn_module_try_files_args args = {
+			.want_loaded = true,
+			.want_debug = true,
+			.arg = &state,
+			.need_gnu_debugaltlink_file =
+				load_debug_info_need_gnu_debugaltlink_file,
+		};
+		const void *build_id;
+		size_t build_id_len;
+		drgn_module_build_id(module, &build_id, &build_id_len);
+		bool missing_debug_info_error;
+		err = load_debug_info_try_files(module, build_id, build_id_len,
+						&args,
+						&missing_debug_info_error);
+		if (err)
+			goto out;
+		if (missing_debug_info_error) {
+			if (missing_debug_info_error_message.len == 0 &&
+			    !string_builder_append(&missing_debug_info_error_message,
+						   "could not get debugging information for:")) { // TODO: not accurate
+				err = &drgn_enomem;
+				goto out;
+			}
+			// TODO: bring back max errors?
+			/* if (!string_builder_line_break(&missing_debug_info_error_message) || */
+			if (!string_builder_appendc(&missing_debug_info_error_message, ' ') ||
+			    !string_builder_append(&missing_debug_info_error_message,
+						   drgn_module_name(module))) {
+				err = &drgn_enomem;
+				goto out;
+			}
+		}
+		// If we are only trying files for the main module (i.e., if
+		// we're not loading all default debug info and any provided
+		// files were all for the main module), then we only want to
+		// create the main module.
+		if (drgn_module_kind(module) == DRGN_MODULE_MAIN
+		    && !load_default && state.unmatched_candidates == 0) {
+			err = NULL;
+			break;
+		}
+	}
+	if (err)
+		goto out;
+
+	if (state.unmatched_candidates != 0) {
+		for (struct load_debug_info_candidate_table_iterator it =
+		     load_debug_info_candidate_table_first(&state.candidates);
+		     it.entry;
+		     it = load_debug_info_candidate_table_next(it)) {
+			for (size_t i = 0; i < it.entry->files.size; i++) {
+				drgn_log_warning(prog,
+						 "%s did not match any loaded modules; ignoring\n",
+						 it.entry->files.data[i].path);
+			}
+		}
+	}
+
+out:
+	if (!err && missing_debug_info_error_message.len > 0) {
+		err = drgn_error_from_string_builder(DRGN_ERROR_MISSING_DEBUG_INFO,
+						     &missing_debug_info_error_message);
+	} else {
+		free(missing_debug_info_error_message.str);
+	}
+	drgn_module_iterator_destroy(it);
+out_state:
+	load_debug_info_state_deinit(&state);
+	return err;
 }
 
 struct drgn_module *drgn_module_by_address(struct drgn_debug_info *dbinfo,

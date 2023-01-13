@@ -764,12 +764,6 @@ static void drgn_program_set_language_from_main(struct drgn_program *prog) // TO
 }
 #endif
 
-LIBDRGN_PUBLIC struct drgn_error *
-drgn_program_load_debug_info(struct drgn_program *prog)
-{
-	return NULL; // TODO: implement in terms of new API
-}
-
 static struct drgn_error *get_prstatus_pid(struct drgn_program *prog, const char *data,
 					   size_t size, uint32_t *ret)
 {

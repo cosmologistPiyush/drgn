@@ -485,7 +485,7 @@ class Program:
     def loaded_modules(self) -> Iterator[Module]:
         """TODO"""
         ...
-    def main_module(self, name: Optional[Path] = None) -> MainModule:
+    def main_module(self, name: Path) -> MainModule:
         """TODO"""
         ...
     def shared_library_module(
@@ -502,6 +502,9 @@ class Program:
         """TODO"""
         ...
     def extra_module(self, name: Path, id: IntegerLike) -> ExtraModule:
+        """TODO"""
+        ...
+    def find_main_module(self) -> MainModule:
         """TODO"""
         ...
     def find_shared_library_module(
