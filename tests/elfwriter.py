@@ -4,12 +4,13 @@
 import struct
 from typing import List, NamedTuple, Optional, Sequence
 
-from tests.elf import ET, PT, SHN, SHT, STB, STT, STV
+from tests.elf import ET, PT, SHF, SHN, SHT, STB, STT, STV
 
 
 class ElfSection:
     def __init__(
         self,
+        *,
         data: bytes = b"",
         name: Optional[str] = None,
         sh_type: Optional[SHT] = None,
@@ -21,6 +22,7 @@ class ElfSection:
         sh_link: int = 0,
         sh_info: int = 0,
         sh_entsize: int = 0,
+        sh_flags: SHF = SHF(0),
     ):
         self.data = data
         self.name = name
@@ -33,6 +35,7 @@ class ElfSection:
         self.sh_link = sh_link
         self.sh_info = sh_info
         self.sh_entsize = sh_entsize
+        self.sh_flags = sh_flags
 
         assert (self.name is not None) or (self.p_type is not None)
         assert (self.name is None) == (self.sh_type is None)
@@ -112,8 +115,10 @@ def _create_symtab(
 
 def create_elf_file(
     type: ET,
-    sections: Sequence[ElfSection],
+    sections: Sequence[ElfSection] = (),
     symbols: Sequence[ElfSymbol] = (),
+    *,
+    build_id: Optional[bytes] = None,
     little_endian: bool = True,
     bits: int = 64,
 ):
@@ -129,10 +134,25 @@ def create_elf_file(
         shdr_struct = struct.Struct(endian + "10I")
         phdr_struct = struct.Struct(endian + "8I")
         e_machine = 3 if little_endian else 8  # EM_386 or EM_MIPS
+    nhdr_struct = struct.Struct(endian + "3I")
 
     sections = list(sections)
     if symbols:
         _create_symtab(sections, symbols, little_endian=little_endian, bits=bits)
+    if build_id is not None:
+        build_id_note = (
+            nhdr_struct.pack(
+                4,  # n_namesz,
+                len(build_id),  # n_namesz,
+                3,  # n_type = NT_GNU_BUILD_ID
+            )
+            + b"GNU\0"
+            + build_id
+            + bytes(-len(build_id) % 4)
+        )
+        sections.append(
+            ElfSection(name=".note.gnu.build-id", sh_type=SHT.NOTE, data=build_id_note)
+        )
     shnum = 0
     phnum = 0
     shstrtab = bytearray(1)
@@ -146,7 +166,6 @@ def create_elf_file(
     if shnum > 0:
         shnum += 2  # One for the SHT_NULL section, one for .shstrtab.
         shstrtab.extend(b".shstrtab\0")
-        sections = list(sections)
         sections.append(ElfSection(name=".shstrtab", sh_type=SHT.STRTAB, data=shstrtab))
 
     shdr_offset = ehdr_struct.size
@@ -198,7 +217,7 @@ def create_elf_file(
                 shdr_offset,
                 shstrtab.index(section.name.encode()),  # sh_name
                 section.sh_type,  # sh_type
-                0,  # sh_flags
+                section.sh_flags,  # sh_flags
                 section.vaddr,  # sh_addr
                 len(buf),  # sh_offset
                 section.memsz,  # sh_size

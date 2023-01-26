@@ -2822,7 +2822,7 @@ index_global_namespace(struct drgn_debug_info *dbinfo)
 
 	struct drgn_module_vector modules = VECTOR_INIT;
 	for (struct drgn_module *module = dbinfo->modules_pending_indexing;
-	     module; module = module->modules_pending_indexing_next) {
+	     module; module = module->pending_indexing_next) {
 		if (!drgn_module_vector_append(&modules, &module)) {
 			drgn_module_vector_deinit(&modules);
 			return &drgn_enomem;

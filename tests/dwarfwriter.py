@@ -285,17 +285,29 @@ def dwarf_sections(
 
 
 def compile_dwarf(
-    dies, little_endian=True, bits=64, *, lang=None, use_dw_form_indirect=False
+    dies,
+    little_endian=True,
+    bits=64,
+    *,
+    sections=(),
+    build_id=None,
+    lang=None,
+    use_dw_form_indirect=False,
 ):
-    return create_elf_file(
-        ET.EXEC,
+    sections = list(sections)
+    sections.extend(
         dwarf_sections(
             dies,
             little_endian=little_endian,
             bits=bits,
             lang=lang,
             use_dw_form_indirect=use_dw_form_indirect,
-        ),
+        )
+    )
+    return create_elf_file(
+        ET.EXEC,
+        sections=sections,
+        build_id=build_id,
         little_endian=little_endian,
         bits=bits,
     )

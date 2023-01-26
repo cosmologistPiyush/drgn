@@ -957,6 +957,8 @@ class Module:
     """TODO"""
     debug_file_path: Optional[str]
     """TODO"""
+    gnu_debugaltlink_file_path: Optional[str]
+    """TODO"""
 
     def set_address_range(self, start: int, end: int) -> None:
         """TODO"""

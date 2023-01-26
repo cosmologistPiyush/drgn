@@ -809,6 +809,9 @@ const char *drgn_module_loaded_file_path(const struct drgn_module *module);
 
 const char *drgn_module_debug_file_path(const struct drgn_module *module);
 
+const char *
+drgn_module_gnu_debugaltlink_file_path(const struct drgn_module *module);
+
 enum drgn_module_file_status {
 	DRGN_MODULE_FILE_ALREADY_HAD,
 	DRGN_MODULE_FILE_NOT_NEEDED,

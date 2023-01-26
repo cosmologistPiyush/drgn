@@ -22,6 +22,7 @@ def main() -> None:
         for name in (
             "ET",
             "PT",
+            "SHF",
             "SHN",
             "SHT",
             "STB",
@@ -32,13 +33,15 @@ def main() -> None:
     for match in re.finditer(
         r"^\s*#\s*define\s+(?P<enum>"
         + "|".join(enums)
-        + r")_(?P<name>\w+)\s+(?P<value>0x[0-9a-fA-F]+|[0-9]+)",
+        + r")_(?P<name>\w+)\s+(?P<value>(?:0x[0-9a-fA-F]+|[0-9]+)|(?:\(\s*1\s*<<\s*[0-9]+\)))",
         contents,
         re.MULTILINE,
     ):
         enum = match.group("enum")
         name = match.group("name")
-        value = int(match.group("value"), 0)
+        # The only things we match are integer literals and (1 <<
+        # decimal_literal), so this is safe.
+        value = eval(match.group("value"))
         enums[enum].append((name, value))
 
     f = sys.stdout
@@ -54,7 +57,8 @@ from typing import Text
     )
     for type_name, constants in enums.items():
         assert constants
-        f.write(f"\n\nclass {type_name}(enum.IntEnum):\n")
+        enum_class = "IntFlag" if type_name == "SHF" else "IntEnum"
+        f.write(f"\n\nclass {type_name}(enum.{enum_class}):\n")
         for name, value in constants:
             f.write(f"    {name} = 0x{value:X}\n")
         f.write(

@@ -249,6 +249,33 @@ struct drgn_module *drgn_module_find(struct drgn_program *prog,
 	}
 }
 
+// TODO: not a big fan of this
+static struct drgn_error *drgn_program_create_dbinfo(struct drgn_program *prog)
+{
+	struct drgn_error *err;
+	if (prog->dbinfo)
+		return NULL;
+	struct drgn_debug_info *dbinfo;
+	err = drgn_debug_info_create(prog, &dbinfo);
+	if (err)
+		return err;
+	err = drgn_program_add_object_finder(prog, drgn_debug_info_find_object,
+					     dbinfo);
+	if (err) {
+		drgn_debug_info_destroy(dbinfo);
+		return err;
+	}
+	err = drgn_program_add_type_finder(prog, drgn_debug_info_find_type,
+					   dbinfo);
+	if (err) {
+		drgn_object_index_remove_finder(&prog->oindex);
+		drgn_debug_info_destroy(dbinfo);
+		return err;
+	}
+	prog->dbinfo = dbinfo;
+	return NULL;
+}
+
 struct drgn_error *drgn_module_find_or_create(struct drgn_program *prog,
 					      const struct drgn_module_key *key,
 					      const char *name,
@@ -256,7 +283,10 @@ struct drgn_error *drgn_module_find_or_create(struct drgn_program *prog,
 					      bool *new_ret)
 {
 	struct drgn_error *err;
-	// TODO: need to create dbinfo here (instead? in addition to?)
+
+	err = drgn_program_create_dbinfo(prog);
+	if (err)
+		return err;
 
 	struct hash_pair hp;
 	if (key->kind == DRGN_MODULE_MAIN) {
@@ -520,7 +550,7 @@ struct drgn_error *drgn_module_set_build_id(struct drgn_module *module,
 		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,
 					 "build ID cannot be empty");
 	}
-	// TODO: allow changing?
+	// TODO: allow changing? allow unsetting?
 	if (module->build_id_len > 0) {
 		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,
 					 "build ID is already set");
@@ -548,6 +578,13 @@ LIBDRGN_PUBLIC
 const char *drgn_module_debug_file_path(const struct drgn_module *module)
 {
 	return module->debug_file ? module->debug_file->path : NULL;
+}
+
+LIBDRGN_PUBLIC const char *
+drgn_module_gnu_debugaltlink_file_path(const struct drgn_module *module)
+{
+	return module->gnu_debugaltlink_file ?
+	       module->gnu_debugaltlink_file->path : NULL;
 }
 
 bool drgn_module_set_section_address(struct drgn_module *module, const char *name,
@@ -795,10 +832,10 @@ drgn_module_maybe_use_elf_file(struct drgn_module *module,
 	if (use_debug) {
 		module->debug_file = file;
 		state->want_debug = false;
-		module->modules_pending_indexing_next =
+		module->pending_indexing_next =
 			prog->dbinfo->modules_pending_indexing;
 		if (prog->dbinfo->modules_pending_indexing) {
-			prog->dbinfo->modules_pending_indexing->modules_pending_indexing_prev
+			prog->dbinfo->modules_pending_indexing->pending_indexing_prev
 				= module;
 		}
 		prog->dbinfo->modules_pending_indexing = module;
@@ -810,6 +847,11 @@ drgn_module_maybe_use_elf_file(struct drgn_module *module,
 		drgn_log_info(prog, "using loadable file %s\n", file->path);
 	} else if (use_debug) {
 		drgn_log_info(prog, "using debug info file %s\n", file->path);
+	}
+	if (!prog->has_platform) {
+		drgn_log_info(prog, "setting program platform from %s\n",
+			      file->path);
+		drgn_program_set_platform(prog, &file->platform);
 	}
 	return NULL;
 
@@ -852,11 +894,11 @@ drgn_module_try_file_internal(struct drgn_module *module,
 		goto out_elf;
 	}
 
-	if (check_build_id) {
+	if (check_build_id) { // TODO: what if no build ID?
 		const void *build_id;
 		size_t build_id_len;
-		if (!drgn_module_try_files_build_id(module, &build_id,
-						    &build_id_len)) {
+		if (drgn_module_try_files_build_id(module, &build_id,
+						   &build_id_len)) {
 			const void *elf_build_id;
 			ssize_t elf_build_id_len =
 				dwelf_elf_gnu_build_id(elf, &elf_build_id);
@@ -891,7 +933,9 @@ drgn_module_try_file_internal(struct drgn_module *module,
 		}
 		uint32_t crc = ~crc32_update(-1, rawfile, size);
 		if (crc != *expected_crc) {
-			drgn_log_debug(prog, "CRC does not match\n");
+			drgn_log_debug(prog,
+				       "CRC 0x%08" PRIx32 " does not match\n",
+				       crc);
 			err = NULL;
 			goto out_elf;
 		}
@@ -1374,6 +1418,7 @@ drgn_module_try_local_files_internal(struct drgn_module *module,
 		if (err || drgn_module_try_files_done(state))
 			return err;
 	}
+	// ... and vice versa.
 	if (state->want_debug && module->loaded_file
 	    && drgn_elf_file_has_dwarf(module->loaded_file)) {
 		drgn_log_debug(prog,
@@ -4612,28 +4657,9 @@ drgn_loaded_module_iterator_create(struct drgn_program *prog,
 				   struct drgn_module_iterator **ret)
 {
 	struct drgn_error *err;
-	struct drgn_debug_info *dbinfo = prog->dbinfo;
-	if (!dbinfo) {
-		err = drgn_debug_info_create(prog, &dbinfo);
-		if (err)
-			return err;
-		err = drgn_program_add_object_finder(prog,
-						     drgn_debug_info_find_object,
-						     dbinfo);
-		if (err) {
-			drgn_debug_info_destroy(dbinfo);
-			return err;
-		}
-		err = drgn_program_add_type_finder(prog,
-						   drgn_debug_info_find_type,
-						   dbinfo);
-		if (err) {
-			drgn_object_index_remove_finder(&prog->oindex);
-			drgn_debug_info_destroy(dbinfo);
-			return err;
-		}
-		prog->dbinfo = dbinfo;
-	}
+	err = drgn_program_create_dbinfo(prog);
+	if (err)
+		return err;
 	if (prog->flags & DRGN_PROGRAM_IS_LINUX_KERNEL)
 		return linux_kernel_loaded_module_iterator_create(prog, ret);
 	else if (prog->flags & DRGN_PROGRAM_IS_LIVE)

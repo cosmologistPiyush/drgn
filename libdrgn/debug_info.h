@@ -181,8 +181,8 @@ struct drgn_module {
 	struct drgn_module_section_address_map section_addresses;
 
 	struct drgn_module_trying_gnu_debugaltlink *trying_gnu_debugaltlink;
-	struct drgn_module *modules_pending_indexing_next;
-	struct drgn_module *modules_pending_indexing_prev;
+	struct drgn_module *pending_indexing_next;
+	struct drgn_module *pending_indexing_prev;
 };
 
 struct drgn_error *drgn_module_find_or_create(struct drgn_program *prog,

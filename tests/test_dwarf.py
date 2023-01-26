@@ -189,7 +189,7 @@ def dwarf_program(*args, segments=None, **kwds):
     with tempfile.NamedTemporaryFile() as f:
         f.write(compile_dwarf(*args, **kwds))
         f.flush()
-        prog.load_debug_info([f.name])
+        prog.extra_module(f.name, 0).try_file(f.name, force=True)
 
     if segments is not None:
         add_mock_memory_segments(prog, segments)

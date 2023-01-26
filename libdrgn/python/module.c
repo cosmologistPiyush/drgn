@@ -4,8 +4,6 @@
 #include "drgnpy.h"
 #include "../util.h"
 
-// TODO: == and != implementation that compares self->module?
-
 PyObject *Module_wrap(struct drgn_module *module)
 {
 	PyTypeObject *type;
@@ -105,6 +103,22 @@ static PyObject *Module_repr(Module *self)
 out:
 	Py_DECREF(parts);
 	return ret;
+}
+
+static PyObject *Module_richcompare(Module *self, PyObject *other, int op)
+{
+	if ((op != Py_EQ && op != Py_NE) ||
+	    !PyObject_TypeCheck(other, &Module_type))
+		Py_RETURN_NOTIMPLEMENTED;
+	int ret = self->module == ((Module *)other)->module;
+	if (op == Py_NE)
+		ret = !ret;
+	Py_RETURN_BOOL(ret);
+}
+
+static Py_hash_t Module_hash(Module *self)
+{
+	return _Py_HashPointer(self->module);
 }
 
 static PyObject *Module_set_address_range(Module *self, PyObject *args,
@@ -241,7 +255,7 @@ out:
 	"want_debug",			\
 	"debug_directories",		\
 	"need_gnu_debugaltlink_file"
-#define MODULE_TRY_FILES_ARGS_FORMAT "ppO!O"
+#define MODULE_TRY_FILES_ARGS_FORMAT "ppO&O"
 #define MODULE_TRY_FILES_ARGS_VARS						\
 	int want_loaded = 1;							\
 	int want_debug = 1;							\
@@ -249,11 +263,11 @@ out:
 		.module = self,							\
 		.need_gnu_debugaltlink_file_callable = Py_None,			\
 	};
-#define MODULE_TRY_FILES_ARGS_ARGS	\
-	&want_loaded,			\
-	&want_debug,			\
-	debug_directories_converter,	\
-	&drgnpy_arg.debug_directories,		\
+#define MODULE_TRY_FILES_ARGS_ARGS			\
+	&want_loaded,					\
+	&want_debug,					\
+	debug_directories_converter,			\
+	&drgnpy_arg.debug_directories,			\
 	&drgnpy_arg.need_gnu_debugaltlink_file_callable
 #define MODULE_TRY_FILES_ARGS_PARSE()							\
 	struct drgn_module_try_files_args try_files_args = {				\
@@ -387,6 +401,23 @@ static PyObject *Module_get_build_id(Module *self, void *arg)
 	return PyBytes_FromStringAndSize(build_id, build_id_len);
 }
 
+static int Module_set_build_id(Module *self, PyObject *value, void *arg)
+{
+	Py_buffer buffer;
+	int ret = PyObject_GetBuffer(value, &buffer, PyBUF_SIMPLE);
+	if (ret)
+		return ret;
+	struct drgn_error *err = drgn_module_set_build_id(self->module,
+							  buffer.buf,
+							  buffer.len);
+	PyBuffer_Release(&buffer);
+	if (err) {
+		set_drgn_error(err);
+		return -1;
+	}
+	return 0;
+}
+
 static PyObject *Module_get_loaded_file_path(Module *self, void *arg)
 {
 	const char *path = drgn_module_loaded_file_path(self->module);
@@ -398,6 +429,14 @@ static PyObject *Module_get_loaded_file_path(Module *self, void *arg)
 static PyObject *Module_get_debug_file_path(Module *self, void *arg)
 {
 	const char *path = drgn_module_debug_file_path(self->module);
+	if (!path)
+		Py_RETURN_NONE;
+	return PyUnicode_DecodeFSDefault(path);
+}
+
+static PyObject *Module_get_gnu_debugaltlink_file_path(Module *self, void *arg)
+{
+	const char *path = drgn_module_gnu_debugaltlink_file_path(self->module);
 	if (!path)
 		Py_RETURN_NONE;
 	return PyUnicode_DecodeFSDefault(path);
@@ -422,12 +461,15 @@ static PyGetSetDef Module_getset[] = {
 	{"name", (getter)Module_get_name, NULL, drgn_Module_name_DOC},
 	{"start", (getter)Module_get_start, NULL, drgn_Module_start_DOC},
 	{"end", (getter)Module_get_end, NULL, drgn_Module_end_DOC},
-	// TODO: set build_id
-	{"build_id", (getter)Module_get_build_id, NULL, drgn_Module_build_id_DOC},
+	{"build_id", (getter)Module_get_build_id, (setter)Module_set_build_id,
+	 drgn_Module_build_id_DOC},
 	{"loaded_file_path", (getter)Module_get_loaded_file_path, NULL,
 	 drgn_Module_loaded_file_path_DOC},
 	{"debug_file_path", (getter)Module_get_debug_file_path, NULL,
 	 drgn_Module_debug_file_path_DOC},
+	{"gnu_debugaltlink_file_path",
+	 (getter)Module_get_gnu_debugaltlink_file_path, NULL,
+	 drgn_Module_gnu_debugaltlink_file_path_DOC},
 	{},
 };
 
@@ -439,6 +481,8 @@ PyTypeObject Module_type = {
 	.tp_repr = (reprfunc)Module_repr,
 	.tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
 	.tp_doc = drgn_Module_DOC,
+	.tp_richcompare = (richcmpfunc)Module_richcompare,
+	.tp_hash = (hashfunc)Module_hash,
 	.tp_methods = Module_methods,
 	.tp_getset = Module_getset,
 };
