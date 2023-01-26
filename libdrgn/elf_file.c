@@ -199,7 +199,24 @@ struct drgn_error *drgn_elf_file_precache_sections(struct drgn_elf_file *file)
 	 */
 	truncate_null_terminated_section(file->scn_data[DRGN_SCN_DEBUG_STR]);
 	truncate_null_terminated_section(file->scn_data[DRGN_SCN_DEBUG_LINE_STR]);
-	truncate_null_terminated_section(file->alt_debug_str_data); // TODO: ???
+
+	// TODO: ugly place to put this
+	struct drgn_elf_file *gnu_debugaltlink_file = file->module->gnu_debugaltlink_file;
+	if (gnu_debugaltlink_file) {
+		err = read_elf_section(gnu_debugaltlink_file->scns[DRGN_SCN_DEBUG_INFO],
+				       &gnu_debugaltlink_file->scn_data[DRGN_SCN_DEBUG_INFO]);
+		if (err)
+			return err;
+		err = read_elf_section(gnu_debugaltlink_file->scns[DRGN_SCN_DEBUG_STR],
+				       &gnu_debugaltlink_file->scn_data[DRGN_SCN_DEBUG_STR]);
+		if (err)
+			return err;
+		truncate_null_terminated_section(gnu_debugaltlink_file->scn_data[DRGN_SCN_DEBUG_STR]);
+		file->alt_debug_info_data =
+			gnu_debugaltlink_file->scn_data[DRGN_SCN_DEBUG_INFO];
+		file->alt_debug_str_data =
+			gnu_debugaltlink_file->scn_data[DRGN_SCN_DEBUG_STR];
+	}
 	return NULL;
 }
 

@@ -2807,29 +2807,42 @@ static void drgn_dwarf_index_rollback(struct drgn_debug_info *dbinfo) // TODO
 }
 #endif
 
+DEFINE_VECTOR(drgn_module_vector, struct drgn_module *);
+
 static struct drgn_error *
 index_global_namespace(struct drgn_debug_info *dbinfo)
 {
-	if (dbinfo->modules_pending_indexing.size == 0)
+	struct drgn_error *err;
+
+	if (!dbinfo->modules_pending_indexing)
 		return NULL;
 
 	if (!drgn_namespace_dwarf_index_alloc_shards(&dbinfo->dwarf.global))
 		return &drgn_enomem;
 
+	struct drgn_module_vector modules = VECTOR_INIT;
+	for (struct drgn_module *module = dbinfo->modules_pending_indexing;
+	     module; module = module->modules_pending_indexing_next) {
+		if (!drgn_module_vector_append(&modules, &module)) {
+			drgn_module_vector_deinit(&modules);
+			return &drgn_enomem;
+		}
+	}
+
 	struct drgn_dwarf_index_cu_vector *cus = &dbinfo->dwarf.index_cus;
 	size_t old_cus_size = cus->size;
 
-	struct drgn_error *err = NULL;
+	err = NULL;
 	#pragma omp parallel
 	{
 		struct drgn_dwarf_index_pending_cu_vector pending_cus = VECTOR_INIT;
 
 		#pragma omp for schedule(dynamic) nowait
-		for (size_t i = 0; i < dbinfo->modules_pending_indexing.size; i++) {
+		for (size_t i = 0; i < modules.size; i++) {
 			if (err)
 				continue;
 			struct drgn_error *module_err =
-				drgn_dwarf_index_read_module(dbinfo->modules_pending_indexing.data[i],
+				drgn_dwarf_index_read_module(modules.data[i],
 							     &pending_cus);
 			if (module_err) {
 				#pragma omp critical(drgn_dwarf_index_read_modules)
@@ -2867,8 +2880,9 @@ index_global_namespace(struct drgn_debug_info *dbinfo)
 
 		drgn_dwarf_index_pending_cu_vector_deinit(&pending_cus);
 	}
+	drgn_module_vector_deinit(&modules);
 	if (err)
-		goto err;
+		goto out;
 
 	#pragma omp parallel
 	{
@@ -2914,7 +2928,7 @@ index_global_namespace(struct drgn_debug_info *dbinfo)
 		}
 	}
 	if (err)
-		goto err;
+		goto out;
 
 	#pragma omp parallel for schedule(dynamic)
 	for (size_t i = old_cus_size; i < cus->size; i++) {
@@ -2935,12 +2949,11 @@ index_global_namespace(struct drgn_debug_info *dbinfo)
 		}
 	}
 	if (err)
-		goto err;
+		goto out;
 
-	dbinfo->modules_pending_indexing.size = 0;
-	// TODO: drgn_module_vector_shrink_to_fit(&dbinfo->modules_pending_indexing);
+	dbinfo->modules_pending_indexing = NULL;
 
-err:
+out:
 	return err; // TODO
 }
 

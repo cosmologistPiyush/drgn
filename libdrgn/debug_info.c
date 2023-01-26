@@ -227,8 +227,6 @@ DEFINE_BINARY_SEARCH_TREE_FUNCTIONS(drgn_module_address_tree, node,
 				    drgn_module_address_key,
 				    binary_search_tree_scalar_cmp, splay)
 
-DEFINE_VECTOR_FUNCTIONS(drgn_module_vector)
-
 static void drgn_module_free_section_addresses(struct drgn_module *module)
 {
 	for (struct drgn_module_section_address_map_iterator it =
@@ -771,10 +769,6 @@ drgn_module_maybe_use_elf_file(struct drgn_module *module,
 			if (gnu_debugaltlink_file) {
 				dwarf_setalt(file->dwarf,
 					     gnu_debugaltlink_file->dwarf);
-				file->alt_debug_info_data =
-					gnu_debugaltlink_file->scn_data[DRGN_SCN_DEBUG_INFO];
-				file->alt_debug_str_data =
-					gnu_debugaltlink_file->scn_data[DRGN_SCN_DEBUG_STR];
 				module->gnu_debugaltlink_file =
 					gnu_debugaltlink_file;
 			} else {
@@ -801,6 +795,13 @@ drgn_module_maybe_use_elf_file(struct drgn_module *module,
 	if (use_debug) {
 		module->debug_file = file;
 		state->want_debug = false;
+		module->modules_pending_indexing_next =
+			prog->dbinfo->modules_pending_indexing;
+		if (prog->dbinfo->modules_pending_indexing) {
+			prog->dbinfo->modules_pending_indexing->modules_pending_indexing_prev
+				= module;
+		}
+		prog->dbinfo->modules_pending_indexing = module;
 	}
 	if (use_loaded && use_debug) {
 		drgn_log_info(prog, "using loadable file with debug info %s\n",
@@ -4952,7 +4953,6 @@ struct drgn_error *drgn_debug_info_create(struct drgn_program *prog,
 	dbinfo->prog = prog;
 	drgn_module_table_init(&dbinfo->modules);
 	drgn_module_address_tree_init(&dbinfo->modules_by_address);
-	drgn_module_vector_init(&dbinfo->modules_pending_indexing);
 	drgn_dwarf_info_init(dbinfo);
 	*ret = dbinfo;
 	return NULL;
@@ -4964,7 +4964,6 @@ void drgn_debug_info_destroy(struct drgn_debug_info *dbinfo)
 		return;
 	depmod_index_deinit(&dbinfo->modules_dep);
 	drgn_dwarf_info_deinit(dbinfo);
-	drgn_module_vector_deinit(&dbinfo->modules_pending_indexing);
 	// TODO: free the actual modules
 	drgn_module_table_deinit(&dbinfo->modules);
 #ifdef WITH_DEBUGINFOD

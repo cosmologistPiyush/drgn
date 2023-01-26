@@ -43,7 +43,6 @@
 
 DEFINE_HASH_TABLE_TYPE(drgn_module_table, struct drgn_module *)
 DEFINE_BINARY_SEARCH_TREE_TYPE(drgn_module_address_tree, struct drgn_module)
-DEFINE_VECTOR_TYPE(drgn_module_vector, struct drgn_module *)
 
 struct depmod_index {
 	char *path;
@@ -67,7 +66,7 @@ struct drgn_debug_info {
 	struct drgn_module *main_module; // TODO: document
 	struct drgn_module_table modules; // TODO: document
 	struct drgn_module_address_tree modules_by_address; // TODO: document
-	struct drgn_module_vector modules_pending_indexing;
+	struct drgn_module *modules_pending_indexing;
 	/** DWARF debugging information. */
 	struct drgn_dwarf_info dwarf;
 	struct depmod_index modules_dep; // TODO
@@ -182,6 +181,8 @@ struct drgn_module {
 	struct drgn_module_section_address_map section_addresses;
 
 	struct drgn_module_trying_gnu_debugaltlink *trying_gnu_debugaltlink;
+	struct drgn_module *modules_pending_indexing_next;
+	struct drgn_module *modules_pending_indexing_prev;
 };
 
 struct drgn_error *drgn_module_find_or_create(struct drgn_program *prog,

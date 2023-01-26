@@ -4,6 +4,8 @@
 #include "drgnpy.h"
 #include "../util.h"
 
+// TODO: == and != implementation that compares self->module?
+
 PyObject *Module_wrap(struct drgn_module *module)
 {
 	PyTypeObject *type;
