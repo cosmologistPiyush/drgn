@@ -736,6 +736,162 @@ drgn_module_find_gnu_debugaltlink_file(struct drgn_module *module,
 	return NULL;
 }
 
+// Get the address range of an ELF file from the start address of the first
+// loadable segment and the end address of the last loadable segment.
+static void
+elf_address_range_from_first_and_last_phdr(struct drgn_program *prog, Elf *elf,
+					   uint64_t bias, uint64_t *start_ret,
+					   uint64_t *end_ret)
+{
+	size_t phnum;
+	if (elf_getphdrnum(elf, &phnum) != 0) {
+		drgn_log_debug(prog, "elf_getphdrnum: %s\n", elf_errmsg(-1));
+		goto err;
+	}
+
+	uint64_t start;
+	GElf_Phdr phdr_mem, *phdr;
+	size_t i;
+	for (i = 0; i < phnum; i++) {
+		phdr = gelf_getphdr(elf, i, &phdr_mem);
+		if (!phdr) {
+			drgn_log_debug(prog, "gelf_getphdr: %s\n",
+				       elf_errmsg(-1));
+			goto err;
+		}
+		if (phdr->p_type == PT_LOAD) {
+			start = phdr->p_vaddr + bias;
+			break;
+		}
+	}
+	if (i >= phnum) {
+		drgn_log_debug(prog, "file has no loadable segments\n");
+		goto err;
+	}
+
+	for (i = phnum; i-- > 0;) {
+		phdr = gelf_getphdr(elf, i, &phdr_mem);
+		if (!phdr) {
+			drgn_log_debug(prog, "gelf_getphdr: %s\n",
+				       elf_errmsg(-1));
+			goto err;
+		}
+		if (phdr->p_type == PT_LOAD) {
+			uint64_t end = phdr->p_vaddr + phdr->p_memsz + bias;
+			if (start < end) {
+				*start_ret = start;
+				*end_ret = end;
+				return;
+			}
+			drgn_log_debug(prog,
+				       "first and last loadable segments are not valid\n");
+			goto err;
+		}
+	}
+	// This shouldn't happen.
+	drgn_log_debug(prog, "loadable segment disappeared\n");
+err:
+	*start_ret = *end_ret = 0;
+}
+
+// Get the address range of an ELF file from the minimum start address of any
+// loadable segment and the maximum end address of any loadable segment.
+static void
+elf_address_range_from_min_and_max_phdr(struct drgn_program *prog, Elf *elf,
+					uint64_t bias, uint64_t *start_ret,
+					uint64_t *end_ret)
+{
+	size_t phnum;
+	if (elf_getphdrnum(elf, &phnum) != 0) {
+		drgn_log_debug(prog, "elf_getphdrnum: %s\n", elf_errmsg(-1));
+		goto err;
+	}
+
+	uint64_t start = UINT64_MAX, end = 0;
+	for (size_t i = 0; i < phnum; i++) {
+		GElf_Phdr phdr_mem, *phdr = gelf_getphdr(elf, i, &phdr_mem);
+		if (!phdr) {
+			drgn_log_debug(prog, "gelf_getphdr: %s\n",
+				       elf_errmsg(-1));
+			goto err;
+		}
+		if (phdr->p_type == PT_LOAD) {
+			start = min(start, phdr->p_vaddr + bias);
+			end = max(end, phdr->p_vaddr + phdr->p_memsz + bias);
+		}
+	}
+	if (start < end) {
+		*start_ret = start;
+		*end_ret = end;
+		return;
+	}
+
+	drgn_log_debug(prog, "file has no valid loadable segments\n");
+err:
+	*start_ret = *end_ret = 0;
+}
+
+static void
+drgn_module_set_address_range_from_elf_file(struct drgn_module *module,
+					    struct drgn_elf_file *file,
+					    uint64_t bias)
+{
+	struct drgn_program *prog = module->prog;
+
+	if (module->start != UINT64_MAX) {
+		// Address range is already set.
+		return;
+	}
+
+	// The ELF specification says that "loadable segment entries in the
+	// program header table appear in ascending order, sorted on the p_vaddr
+	// member." However, this is not the case in practice.
+	uint64_t start, end;
+	if ((prog->flags & DRGN_PROGRAM_IS_LINUX_KERNEL) &&
+	    module->kind == DRGN_MODULE_MAIN) {
+		// vmlinux on some architectures contains special segments whose
+		// addresses are not meaningful (e.g., segments corresponding to
+		// the .data..percpu section on x86-64 and the .vectors and
+		// .stubs sections on Arm). Rather than adding special cases
+		// based on section names, we assume that these special segments
+		// are never first or last and that the segments are otherwise
+		// sorted, which seems to always be true.
+		elf_address_range_from_first_and_last_phdr(prog, file->elf,
+							   bias, &start, &end);
+	} else if (!(prog->flags & DRGN_PROGRAM_IS_LINUX_KERNEL) &&
+		   (module->kind == DRGN_MODULE_MAIN ||
+		    module->kind == DRGN_MODULE_SHARED_LIBRARY ||
+		    module->kind == DRGN_MODULE_VDSO)) {
+		// Userspace ELF loaders disagree about whether to assume this
+		// sorting:
+		//
+		// - As of Linux kernel commit 10b19249192a ("ELF: fix overflow
+		//   in total mapping size calculation") (in v5.18), the Linux
+		//   kernel DOES NOT assume sorting. Before that, it DOES.
+		// - glibc as of v2.37 DOES assume sorting; see
+		//   _dl_map_object_from_fd() in elf/dl-load.c and
+		//   _dl_map_segments() in elf/dl-map-segments.h.
+		// - musl as of v1.2.3 DOES NOT assume sorting; see
+		//   map_library() in ldso/dynlink.c.
+		//
+		// Since it's not enforced by some ELF loaders that we might
+		// encounter, we don't assume the sorted order, either.
+		elf_address_range_from_min_and_max_phdr(prog, file->elf, bias,
+							&start, &end);
+	} else {
+		return;
+	}
+
+	if (start >= end)
+		return;
+	drgn_log_debug(prog,
+		       "got address range 0x%" PRIx64 "-0x%" PRIx64 " from file\n",
+		       start, end);
+	struct drgn_error *err =
+		drgn_module_set_address_range(module, start, end);
+	assert(!err);
+}
+
 // TODO: explain file ownership
 static struct drgn_error *
 drgn_module_maybe_use_elf_file(struct drgn_module *module,
@@ -767,16 +923,6 @@ drgn_module_maybe_use_elf_file(struct drgn_module *module,
 
 	// TODO:
 	// - Copy section addresses
-	// - Get bias
-#if 0
-	if ((prog->flags & DRGN_PROGRAM_IS_LINUX_KERNEL) &&
-	    module->kind == DRGN_MODULE_MAIN) {
-		if (use_loaded)
-			module->loaded_file_bias = prog->vmcoreinfo.kaslr_offset;
-		if (use_debug)
-			module->debug_file_bias = prog->vmcoreinfo.kaslr_offset;
-	}
-#endif
 
 	if (use_debug) {
 		file->dwarf = dwarf_begin_elf(file->elf, DWARF_C_READ, NULL);
@@ -822,15 +968,38 @@ drgn_module_maybe_use_elf_file(struct drgn_module *module,
 		goto unused;
 	}
 
+	if (use_loaded && use_debug) {
+		drgn_log_info(prog, "using loadable file with debug info %s\n",
+			      file->path);
+	} else if (use_loaded) {
+		drgn_log_info(prog, "using loadable file %s\n", file->path);
+	} else if (use_debug) {
+		drgn_log_info(prog, "using debug info file %s\n", file->path);
+	}
+
 	// TODO: set address range (UNLESS SOMEONE ALREADY DID)
 	// TODO: set build ID (UNLESS SOMEONE ALREADY DID)
 	// TODO: queue to be indexed
+
+	uint64_t bias = 0;
+	if ((prog->flags & DRGN_PROGRAM_IS_LINUX_KERNEL) &&
+	    module->kind == DRGN_MODULE_MAIN) {
+		bias = prog->vmcoreinfo.kaslr_offset;
+		drgn_log_debug(prog, "got bias 0x%" PRIx64 " from VMCOREINFO\n",
+			       bias);
+	}
+	// TODO: bias for other things.
+
+	drgn_module_set_address_range_from_elf_file(module, file, bias);
+
 	if (use_loaded) {
 		module->loaded_file = file;
+		module->loaded_file_bias = prog->vmcoreinfo.kaslr_offset;
 		state->want_loaded = false;
 	}
 	if (use_debug) {
 		module->debug_file = file;
+		module->debug_file_bias = prog->vmcoreinfo.kaslr_offset;
 		state->want_debug = false;
 		module->pending_indexing_next =
 			prog->dbinfo->modules_pending_indexing;
@@ -840,17 +1009,8 @@ drgn_module_maybe_use_elf_file(struct drgn_module *module,
 		}
 		prog->dbinfo->modules_pending_indexing = module;
 	}
-	if (use_loaded && use_debug) {
-		drgn_log_info(prog, "using loadable file with debug info %s\n",
-			      file->path);
-	} else if (use_loaded) {
-		drgn_log_info(prog, "using loadable file %s\n", file->path);
-	} else if (use_debug) {
-		drgn_log_info(prog, "using debug info file %s\n", file->path);
-	}
 	if (!prog->has_platform) {
-		drgn_log_info(prog, "setting program platform from %s\n",
-			      file->path);
+		drgn_log_info(prog, "setting program platform from file\n");
 		drgn_program_set_platform(prog, &file->platform);
 	}
 	return NULL;
@@ -2173,57 +2333,6 @@ drgn_module_copy_section_addresses(struct drgn_module *module, Elf *elf)
 	return NULL;
 }
 
-// Get the start address from the first loadable segment and the end address
-// from the last loadable segment.
-//
-// The ELF specification states that loadable segments are sorted on p_vaddr.
-// However, vmlinux on x86-64 has an out of order segment for .data..percpu, and
-// Arm has a couple for .vector and .stubs. Thankfully, those are placed in the
-// middle by the vmlinux linker script, so we can still rely on the first and
-// last loadable segments.
-static struct drgn_error *
-drgn_module_get_address_range(struct drgn_module *module, Elf *elf,
-			      uint64_t bias)
-{
-	size_t phnum;
-	if (elf_getphdrnum(elf, &phnum) != 0)
-		return drgn_error_libelf();
-
-	uint64_t start = UINT64_MAX, end = 0;
-	GElf_Phdr phdr_mem, *phdr;
-	size_t i;
-	for (i = 0; i < phnum; i++) {
-		phdr = gelf_getphdr(elf, i, &phdr_mem);
-		if (!phdr)
-			return drgn_error_libelf();
-		if (phdr->p_type != PT_LOAD)
-			continue;
-		uint64_t align = phdr->p_align ? phdr->p_align : 1;
-		start = (phdr->p_vaddr & -align) + bias;
-		break;
-	}
-	if (i >= phnum) {
-		return drgn_error_create(DRGN_ERROR_OTHER,
-					 "no loadable segments");
-	}
-
-	for (i = phnum - 1;; i--) {
-		phdr = gelf_getphdr(elf, i, &phdr_mem);
-		if (!phdr)
-			return drgn_error_libelf();
-		if (phdr->p_type != PT_LOAD)
-			continue;
-		end = (phdr->p_vaddr + phdr->p_memsz) + bias;
-		if (start >= end) {
-			return drgn_error_create(DRGN_ERROR_OTHER,
-						 "empty address range");
-		}
-		module->start = start;
-		module->end = end;
-		return NULL;
-	}
-}
-
 struct debugaltlink_report_arg {
 	const char *debug_path;
 	const char *debugaltlink;
@@ -3541,21 +3650,10 @@ identify_module_from_phdrs(struct userspace_loaded_module_iterator *it,
 	for (size_t i = 0; i < phnum; i++) {
 		GElf_Phdr phdr;
 		userspace_loaded_module_iterator_phdr(it, i, &phdr);
-		// The ELF specification says that "loadable segment entries in
-		// the program header table appear in ascending order, sorted on
-		// the p_vaddr member." However, as of Linux kernel commit
-		// 10b19249192a ("ELF: fix overflow in total mapping size
-		// calculation") (in v5.18), the Linux kernel doesn't enforce
-		// this, and it's easy for us not to assume.
 		if (phdr.p_type == PT_LOAD) {
-			uint64_t segment_start = phdr.p_vaddr + bias;
-			uint64_t segment_end = segment_start + phdr.p_memsz;
-			if (segment_start < segment_end) {
-				if (segment_start < start)
-					start = segment_start;
-				if (segment_end > end)
-					end = segment_end;
-			}
+			// Like elf_address_range_from_min_and_max_phdr().
+			start = min(start, phdr.p_vaddr + bias);
+			end = max(end, phdr.p_vaddr + phdr.p_memsz + bias);
 		} else if (phdr.p_type == PT_NOTE
 			   && module->build_id_len == 0) {
 			uint64_t note_size = min(phdr.p_filesz, phdr.p_memsz);
