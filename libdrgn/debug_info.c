@@ -1054,7 +1054,7 @@ drgn_module_try_file_internal(struct drgn_module *module,
 		goto out_elf;
 	}
 
-	if (check_build_id) { // TODO: what if no build ID?
+	if (check_build_id) {
 		const void *build_id;
 		size_t build_id_len;
 		if (drgn_module_try_files_build_id(module, &build_id,
@@ -1858,41 +1858,80 @@ static void write_ascii_spinner(struct string_builder *sb, int pos)
 	sb->str[sb->len++] = spinner[pos % array_size(spinner)];
 }
 
-static void drgn_log_debuginfod_progress(struct drgn_program *prog, long a,
+// This is called with:
+// - a >= 0 && b == 0 while cleaning the debuginfod cache, where a is the number
+//   of files in the cache that have been checked.
+// - a >= 0 && b == 0 while waiting to read the first chunk of data from a
+//   debuginfod server, where a is an increasing counter. Note that this cannot
+//   be distinguished from the previous case.
+// - a >= 0 && b > 0 while downloading, where a is the number of bytes
+//   downloaded and b is the total size to download in bytes.
+// - a >= 0 && b < 0 while downloading, where a is the number of bytes
+//   downloaded and the total size is not known.
+// - a < 0 when the download has finished. result >= 0 is success, result < 0 is
+//   an error.
+static void drgn_log_debuginfod_progress(debuginfod_client *client, long a,
 					 long b, int result)
 {
-	const bool done = b == 0;
-	const bool error = result < 0;
+	struct drgn_program *prog = drgn_debuginfod_get_user_data(client);
 
-	if (!prog->dbinfo->debuginfod_downloaded) {
-		if (!error) {
-			drgn_log_debug(prog, "found %s%s in debuginfod cache\n",
-				       prog->dbinfo->debuginfod_current_name,
-				       prog->dbinfo->debuginfod_current_type);
-		} else if (result == -ENOSYS) {
-			if (!prog->dbinfo->logged_no_debuginfod) {
-				drgn_log_debug(prog,
-					       "no debuginfod servers configured; "
-					       "try setting DEBUGINFOD_URLS\n");
-				prog->dbinfo->logged_no_debuginfod = true;
-			}
-		} else {
+	if (!drgn_should_log(prog, DRGN_LOG_LEVEL_NOTICE))
+		return;
+
+	const bool done = a < 0;
+
+	// If we already started logging progress for this download when it
+	// failed, we log the error like progress below. Otherwise, the download
+	// failed very early, so we only log a debug message.
+	if (done && result < 0 && !prog->dbinfo->logged_debuginfod_progress) {
+		if (result != -ENOSYS) {
 			errno = -result;
 			drgn_log_debug(prog,
 				       "couldn't download %s%s from debuginfod: %m\n",
 				       prog->dbinfo->debuginfod_current_name,
 				       prog->dbinfo->debuginfod_current_type);
+		} else if (!prog->dbinfo->logged_no_debuginfod) {
+			drgn_log_debug(prog,
+				       "no debuginfod servers configured; "
+				       "try setting DEBUGINFOD_URLS\n");
+			prog->dbinfo->logged_no_debuginfod = true;
 		}
 		return;
 	}
-
-	if (!drgn_should_log(prog, DRGN_LOG_LEVEL_NOTICE))
-		return;
+	prog->dbinfo->logged_debuginfod_progress = true;
 
 	struct winsize winsize;
 	const bool tty = ioctl(prog->log_file
 			       ? fileno(prog->log_file) : prog->log_fd,
 			       TIOCGWINSZ, &winsize) == 0;
+
+	// ANSI escape sequence to clear the current line and return the cursor
+	// to the beginning of the line.
+	static const char ansi_erase_line[] = "\33[2K\r";
+
+	// Once we know what URL we are downloading from, log it.
+	if (!prog->dbinfo->logged_debuginfod_url) {
+		const char *url = drgn_debuginfod_get_url(client);
+		if (url) {
+			prog->dbinfo->logged_debuginfod_url = true;
+			// Erase the current line since we may have logged
+			// progress.
+			drgn_log_debug(prog, "%sdownloading from %s\n",
+				       tty ? ansi_erase_line : "", url);
+		}
+	}
+
+	// If we succeeded without ever getting a URL, it must have been cached.
+	if (done && result >= 0 && !prog->dbinfo->logged_debuginfod_url) {
+		// We may have logged download progress when we were actually
+		// cleaning the cache. Clear it to avoid confusion.
+		if (tty)
+			drgn_log_notice(prog, ansi_erase_line);
+		drgn_log_debug(prog, "found %s%s in debuginfod cache\n",
+			       prog->dbinfo->debuginfod_current_name,
+			       prog->dbinfo->debuginfod_current_type);
+		return;
+	}
 
 	// We only do the progress animation if we would have at least one
 	// column for a progress bar. Using the calculation for bar_columns
@@ -1935,7 +1974,7 @@ static void drgn_log_debuginfod_progress(struct drgn_program *prog, long a,
 	}
 
 	if (!string_builder_append(&sb,
-				   done && !error
+				   done && result >= 0
 				   ? "Downloaded " : "Downloading ") ||
 	    !string_builder_append(&sb,
 				   prog->dbinfo->debuginfod_current_name) ||
@@ -1944,11 +1983,11 @@ static void drgn_log_debuginfod_progress(struct drgn_program *prog, long a,
 		goto out;
 
 	size_t download_size_start = sb.len;
-	if (error) {
+	if (result < 0) {
 		errno = -result;
 		if (!string_builder_appendf(&sb, " failed: %m"))
 			goto out;
-	} else {
+	} else if (b != 0) {
 		intmax_t download_size;
 		if (done) {
 			struct stat st;
@@ -2068,23 +2107,8 @@ out:
 
 static int drgn_debuginfod_progressfn(debuginfod_client *client, long a, long b)
 {
-	struct drgn_program *prog = drgn_debuginfod_get_user_data(client);
-	// TODO: it seems like some unresponsive cases are indistinguishable
-	// from cleaning cache
-	if (b == 0) {
-		if (a == 1)
-			drgn_log_debug(prog, "cleaning debuginfod cache\n");
-		return 0;
-	}
-	if (a < 0)
-		return 0;
-	if (!prog->dbinfo->debuginfod_downloaded) {
-		const char *url = drgn_debuginfod_get_url(client);
-		if (url)
-			drgn_log_debug(prog, "downloading from %s\n", url);
-		prog->dbinfo->debuginfod_downloaded = true;
-	}
-	drgn_log_debuginfod_progress(prog, a, b, 0);
+	if (a >= 0)
+		drgn_log_debuginfod_progress(client, a, b, 0);
 	return 0;
 }
 #endif // _ELFUTILS_PREREQ(0, 179)
@@ -2142,12 +2166,14 @@ drgn_module_try_download_files_internal(struct drgn_module *module,
 			prog->dbinfo->debuginfod_current_type = " debug info";	\
 		else								\
 			prog->dbinfo->debuginfod_current_type = "";		\
-		prog->dbinfo->debuginfod_downloaded = false;			\
+		prog->dbinfo->logged_debuginfod_progress = false;		\
+		prog->dbinfo->logged_debuginfod_url = false;			\
 		char *path;							\
 		int fd = drgn_debuginfod_find_##which(prog->dbinfo->debuginfod_client,\
 						      build_id, build_id_len,	\
 						      &path);			\
-		drgn_log_debuginfod_progress(prog, 0, 0, fd);			\
+		drgn_log_debuginfod_progress(prog->dbinfo->debuginfod_client,	\
+					     -1, -1, fd);			\
 		if (fd >= 0) {							\
 			err = drgn_module_try_file_internal(module, state,	\
 							    path, fd, false,	\

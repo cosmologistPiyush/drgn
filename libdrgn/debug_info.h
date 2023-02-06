@@ -60,6 +60,8 @@ struct drgn_debug_info {
 	unsigned int debuginfod_spinner_position;
 	bool debuginfod_downloaded;
 	bool logged_no_debuginfod;
+	bool logged_debuginfod_progress;
+	bool logged_debuginfod_url;
 	const char *debuginfod_current_name;
 	const char *debuginfod_current_type;
 #endif
