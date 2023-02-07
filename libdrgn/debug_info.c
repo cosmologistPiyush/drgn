@@ -1345,7 +1345,7 @@ drgn_module_try_proc_files(struct drgn_module *module,
 		struct dirent *ent;
 		while ((errno = 0, ent = readdir(dir))) {
 			uint64_t start, end;
-			if (sscanf(ent->d_name, "%" PRIx64 "-%" PRIx64, &start,
+			if (sscanf(ent->d_name, "%" SCNx64 "-%" SCNx64, &start,
 				   &end) != 2)
 				continue;
 			if (start <= module->shared_library.dynamic_address &&
@@ -3242,59 +3242,60 @@ static void drgn_mapped_file_destroy(struct drgn_mapped_file *file)
 	free(file);
 }
 
-struct drgn_mapped_file_range {
+struct drgn_mapped_file_segment {
 	uint64_t start;
 	uint64_t end;
+	uint64_t file_offset;
 	struct drgn_mapped_file *file;
 };
 
-DEFINE_VECTOR(drgn_mapped_file_range_vector, struct drgn_mapped_file_range)
+DEFINE_VECTOR(drgn_mapped_file_segment_vector, struct drgn_mapped_file_segment)
 
-struct drgn_mapped_file_ranges {
-	struct drgn_mapped_file_range_vector vector;
-	// Whether the ranges are already sorted by start address. This should
+struct drgn_mapped_file_segments {
+	struct drgn_mapped_file_segment_vector vector;
+	// Whether the segments are already sorted by start address. This should
 	// always be true for both /proc/$pid/maps and NT_FILE, but we check and
 	// sort afterwards if not just in case.
 	bool sorted;
 };
 
-#define DRGN_MAPPED_FILE_RANGES_INIT { VECTOR_INIT, true }
+#define DRGN_MAPPED_FILE_SEGMENTS_INIT { VECTOR_INIT, true }
 
-static void drgn_mapped_file_ranges_abort(struct drgn_mapped_file_ranges *ranges)
+static void drgn_mapped_file_segments_abort(struct drgn_mapped_file_segments *segments)
 {
-	drgn_mapped_file_range_vector_deinit(&ranges->vector);
+	drgn_mapped_file_segment_vector_deinit(&segments->vector);
 }
 
 static struct drgn_error *
-drgn_add_mapped_file_range(struct drgn_mapped_file_ranges *ranges,
-			   uint64_t start, uint64_t end, uint64_t file_offset,
-			   struct drgn_mapped_file *file)
+drgn_add_mapped_file_segment(struct drgn_mapped_file_segments *segments,
+			     uint64_t start, uint64_t end, uint64_t file_offset,
+			     struct drgn_mapped_file *file)
 {
 	assert(start < end);
 	if (file_offset == 0 && file->offset0_size == 0) {
 		file->offset0_vaddr = start;
 		file->offset0_size = end - start;
 	}
-	if (ranges->vector.size > 0) {
-		struct drgn_mapped_file_range *last =
-			&ranges->vector.data[ranges->vector.size - 1];
-		// If the last range is contiguous with this one and from the
-		// same file, merge into that one. Note that for this vector, we
-		// only care about what file a particular address came from, so
-		// we don't care about the file offset here.
-		if (file == last->file && start == last->end) {
+	if (segments->vector.size > 0) {
+		struct drgn_mapped_file_segment *last =
+			&segments->vector.data[segments->vector.size - 1];
+		// If the last segment is from the same file and contiguous with
+		// this one, merge into that one.
+		if (file == last->file && start == last->end &&
+		    file_offset == last->file_offset + (last->end - last->start)) {
 			last->end = end;
 			return NULL;
 		}
 		if (start < last->start)
-			ranges->sorted = false;
+			segments->sorted = false;
 	}
-	struct drgn_mapped_file_range *entry =
-		drgn_mapped_file_range_vector_append_entry(&ranges->vector);
+	struct drgn_mapped_file_segment *entry =
+		drgn_mapped_file_segment_vector_append_entry(&segments->vector);
 	if (!entry)
 		return &drgn_enomem;
 	entry->start = start;
 	entry->end = end;
+	entry->file_offset = file_offset;
 	entry->file = file;
 	return NULL;
 }
@@ -3325,9 +3326,10 @@ struct userspace_loaded_module_iterator {
 	bool have_main_dyn;
 	bool have_vdso_dyn;
 
-	struct drgn_mapped_file_range *file_ranges;
-	size_t num_file_ranges;
+	struct drgn_mapped_file_segment *file_segments;
+	size_t num_file_segments;
 
+	uint64_t main_phoff;
 	uint64_t main_bias;
 	uint64_t main_dyn_vaddr;
 	uint64_t main_dyn_memsz;
@@ -3348,13 +3350,14 @@ userspace_loaded_module_iterator_deinit(struct userspace_loaded_module_iterator 
 {
 	free(it->segment_buf);
 	free(it->phdrs_buf);
-	free(it->file_ranges);
+	free(it->file_segments);
 }
 
-static inline int drgn_mapped_file_range_compare(const void *_a, const void *_b)
+static inline int drgn_mapped_file_segment_compare(const void *_a,
+						   const void *_b)
 {
-	const struct drgn_mapped_file_range *a = _a;
-	const struct drgn_mapped_file_range *b = _b;
+	const struct drgn_mapped_file_segment *a = _a;
+	const struct drgn_mapped_file_segment *b = _b;
 	if (a->start < b->start)
 		return -1;
 	else if (a->start > b->start)
@@ -3364,37 +3367,38 @@ static inline int drgn_mapped_file_range_compare(const void *_a, const void *_b)
 }
 
 static void
-userspace_loaded_module_iterator_set_file_ranges(struct userspace_loaded_module_iterator *it,
-						 struct drgn_mapped_file_ranges *ranges)
+userspace_loaded_module_iterator_set_file_segments(struct userspace_loaded_module_iterator *it,
+						   struct drgn_mapped_file_segments *segments)
 {
 	// Don't bother shrinking to fit since this is short-lived.
-	it->file_ranges = ranges->vector.data;
-	it->num_file_ranges = ranges->vector.size;
-	if (!ranges->sorted) {
-		qsort(it->file_ranges, it->num_file_ranges,
-		      sizeof(it->file_ranges[0]),
-		      drgn_mapped_file_range_compare);
+	it->file_segments = segments->vector.data;
+	it->num_file_segments = segments->vector.size;
+	if (!segments->sorted) {
+		qsort(it->file_segments, it->num_file_segments,
+		      sizeof(it->file_segments[0]),
+		      drgn_mapped_file_segment_compare);
 	}
 }
 
-static struct drgn_mapped_file *
-find_mapped_file(struct userspace_loaded_module_iterator *it, uint64_t address)
+static struct drgn_mapped_file_segment *
+find_mapped_file_segment(struct userspace_loaded_module_iterator *it,
+			 uint64_t address)
 {
-	if (!it->num_file_ranges || address < it->file_ranges[0].start)
+	if (!it->num_file_segments || address < it->file_segments[0].start)
 		return NULL;
-	size_t lo = 0, hi = it->num_file_ranges, found = 0;
+	size_t lo = 0, hi = it->num_file_segments, found = 0;
 	while (lo < hi) {
 		size_t mid = lo + (hi - lo) / 2;
-		if (it->file_ranges[mid].start <= address) {
+		if (it->file_segments[mid].start <= address) {
 			found = mid;
 			lo = mid + 1;
 		} else {
 			hi = mid;
 		}
 	}
-	if (address >= it->file_ranges[found].end)
+	if (address >= it->file_segments[found].end)
 		return NULL;
-	return it->file_ranges[found].file;
+	return &it->file_segments[found];
 }
 
 // Alignment of ELF notes is a mess. The [System V
@@ -3712,6 +3716,17 @@ userspace_loaded_module_iterator_read_main_phdrs(struct userspace_loaded_module_
 	struct drgn_error *err;
 	struct drgn_program *prog = it->it.prog;
 
+	// The main bias is the difference between AT_PHDR and the virtual
+	// address of the program headers in the ELF file. We determine the
+	// latter by finding the PT_LOAD segment containing e_phoff. We would
+	// use PT_PHDR instead, but static binaries usually don't have it, and
+	// we can't assume a bias of 0 for static PIE binaries.
+	//
+	// If we couldn't find the file offset of the program headers, we can't
+	// find anything else.
+	if (it->main_phoff == 0)
+		return NULL;
+
 	drgn_log_debug(prog, "reading program header table from AT_PHDR\n");
 
 	err = userspace_loaded_module_iterator_read_phdrs(it,
@@ -3722,35 +3737,42 @@ userspace_loaded_module_iterator_read_main_phdrs(struct userspace_loaded_module_
 	else if (err)
 		return err;
 
-	bool have_pt_phdr = false;
+	uint64_t phdr_vaddr, dyn_vaddr, dyn_memsz;
+	bool have_phdr_vaddr = false, have_dyn = false;
 	for (uint16_t i = 0; i < prog->auxv.at_phnum; i++) {
 		GElf_Phdr phdr;
 		userspace_loaded_module_iterator_phdr(it, i, &phdr);
-		if (phdr.p_type == PT_PHDR) {
+		if (phdr.p_type == PT_LOAD && phdr.p_offset <= it->main_phoff &&
+		    it->main_phoff < phdr.p_offset + phdr.p_filesz) {
 			drgn_log_debug(prog,
-				      "found PT_PHDR with p_vaddr 0x%" PRIx64 "\n",
-				      phdr.p_vaddr);
-			have_pt_phdr = true;
-			it->main_bias = prog->auxv.at_phdr - phdr.p_vaddr;
+				       "found PT_LOAD containing program headers with p_vaddr 0x%" PRIx64
+				       " and p_offset 0x%" PRIx64 "\n",
+				       phdr.p_vaddr, phdr.p_offset);
+			phdr_vaddr = it->main_phoff - phdr.p_offset + phdr.p_vaddr;
+			have_phdr_vaddr = true;
 		} else if (phdr.p_type == PT_DYNAMIC) {
 			drgn_log_debug(prog,
 				       "found PT_DYNAMIC with p_vaddr 0x%" PRIx64
 				       " and p_memsz 0x%" PRIx64 "\n",
 				       phdr.p_vaddr, phdr.p_memsz);
-			it->have_main_dyn = true;
-			it->main_dyn_vaddr = phdr.p_vaddr;
-			it->main_dyn_memsz = phdr.p_memsz;
+			have_dyn = true;
+			dyn_vaddr = phdr.p_vaddr;
+			dyn_memsz = phdr.p_memsz;
 		}
 	}
-	if (have_pt_phdr) {
+	if (have_phdr_vaddr) {
+		it->main_bias = prog->auxv.at_phdr - phdr_vaddr;
 		drgn_log_debug(prog, "main bias is 0x%" PRIx64 "\n",
 			       it->main_bias);
 	} else {
 		drgn_log_debug(prog,
-			       "didn't find PT_PHDR program header; assuming main bias is 0\n");
+			       "didn't find PT_LOAD containing program headers\n");
+		return NULL;
 	}
-	if (it->have_main_dyn) {
-		it->main_dyn_vaddr += it->main_bias;
+	if (have_dyn) {
+		it->have_main_dyn = true;
+		it->main_dyn_vaddr = dyn_vaddr + it->main_bias;
+		it->main_dyn_memsz = dyn_memsz;
 		drgn_log_debug(prog,
 			       "main dynamic section is at 0x%" PRIx64 "\n",
 			       it->main_dyn_vaddr);
@@ -3852,23 +3874,33 @@ userspace_loaded_module_iterator_yield_main(struct userspace_loaded_module_itera
 	struct drgn_error *err;
 	struct drgn_program *prog = it->it.prog;
 
-	struct drgn_mapped_file *file = find_mapped_file(it,
-							 prog->auxv.at_phdr);
-	if (!file) {
+	struct drgn_mapped_file_segment *segment =
+		find_mapped_file_segment(it, prog->auxv.at_phdr);
+	if (segment) {
+		// We don't need to read the file header to get e_phoff. Instead,
+		// determine it from the file mapping.
+		it->main_phoff =
+			segment->file_offset + (prog->auxv.at_phdr - segment->start);
 		drgn_log_debug(prog,
-			       "couldn't find mapped file containing AT_PHDR\n");
+			       "AT_PHDR is mapped from file offset 0x%" PRIx64 "\n",
+			       it->main_phoff);
+	} else {
+		drgn_log_debug(prog,
+			       "couldn't find mapped file segment containing AT_PHDR\n");
 	}
 
 	bool new;
-	err = drgn_module_find_or_create_main(prog, file ? file->path : "", ret,
-					      &new);
+	err = drgn_module_find_or_create_main(prog,
+					      segment ? segment->file->path : "",
+					      ret, &new);
 	if (err || !new)
 		return err;
 	err = userspace_loaded_module_iterator_read_main_phdrs(it);
 	if (err)
 		goto delete_module;
 	if (it->read_main_phdrs) {
-		err = identify_module_from_phdrs(it, *ret, prog->auxv.at_phnum,
+		err = identify_module_from_phdrs(it, *ret,
+						 prog->auxv.at_phnum,
 						 it->main_bias);
 		if (err)
 			goto delete_module;
@@ -4072,6 +4104,7 @@ userspace_get_link_map(struct userspace_loaded_module_iterator *it)
 				"; can't iterate shared libraries\n");
 		return NULL;
 	}
+	// TODO: what if r_debug is NULL?
 
 	struct drgn_r_debug {
 		int32_t r_version;
@@ -4282,10 +4315,11 @@ yield_from_link_map(struct userspace_loaded_module_iterator *it,
 		if (err || !new)
 			return err;
 
-		struct drgn_mapped_file *file =
-			find_mapped_file(it, link_map.l_ld);
-		if (file) {
-			err = identify_module_from_link_map(it, *ret, file,
+		struct drgn_mapped_file_segment *segment =
+			find_mapped_file_segment(it, link_map.l_ld);
+		if (segment) {
+			err = identify_module_from_link_map(it, *ret,
+							    segment->file,
 							    link_map.l_addr);
 			if (err) {
 				drgn_module_delete(*ret);
@@ -4293,7 +4327,7 @@ yield_from_link_map(struct userspace_loaded_module_iterator *it,
 			}
 		} else {
 			drgn_log_debug(prog,
-				       "couldn't find mapped file containing l_ld\n");
+				       "couldn't find mapped file segment containing l_ld\n");
 		}
 		return NULL;
 	}
@@ -4387,7 +4421,7 @@ process_add_mapping(struct process_loaded_module_iterator *it,
 		    const char *maps_path, const char *map_files_path,
 		    int map_files_fd, bool *logged_readlink_eperm,
 		    bool *logged_stat_eperm,
-		    struct drgn_mapped_file_ranges *ranges, char *line,
+		    struct drgn_mapped_file_segments *segments, char *line,
 		    size_t line_len)
 {
 	struct drgn_error *err;
@@ -4398,7 +4432,7 @@ process_add_mapping(struct process_loaded_module_iterator *it,
 	uint64_t ino;
 	int map_name_len, path_index;
 	if (sscanf(line,
-		   "%" PRIx64 "-%" PRIx64 "%n %*s %" PRIx64 " %x:%x %" PRIu64 " %n",
+		   "%" SCNx64 "-%" SCNx64 "%n %*s %" SCNx64 " %x:%x %" SCNu64 " %n",
 		   &segment_start, &segment_end, &map_name_len,
 		   &segment_file_offset, &dev_major, &dev_minor, &ino,
 		   &path_index) != 6) {
@@ -4429,7 +4463,9 @@ process_add_mapping(struct process_loaded_module_iterator *it,
 	//    device numbers returned by stat. We can stat the map_files link to
 	//    get the correct device number.
 	if (map_files_fd >= 0) {
-		line[map_name_len] = '\0';
+		char map_files_name[34];
+		snprintf(map_files_name, sizeof(map_files_name),
+			 "%" PRIx64 "-%" PRIx64, segment_start, segment_end);
 
 		// The escaped path must be at least as long as the original
 		// path, so use that as the readlink buffer size.
@@ -4446,7 +4482,7 @@ process_add_mapping(struct process_loaded_module_iterator *it,
 		// If we can't read this link, we have to fall back to the
 		// escaped path. Newlines and the literal sequence \012 are
 		// unlikely to appear in a path, so it's not a big deal.
-		ssize_t r = readlinkat(map_files_fd, line, real_path, bufsiz);
+		ssize_t r = readlinkat(map_files_fd, map_files_name, real_path, bufsiz);
 		if (r < 0) {
 			if (errno == EPERM) {
 				free(real_path);
@@ -4460,14 +4496,14 @@ process_add_mapping(struct process_loaded_module_iterator *it,
 			} else if (errno == ENOENT) {
 				// We raced with a change to the mapping.
 				drgn_log_debug(prog, "mapping %s disappeared\n",
-					       line);
+					       map_files_name);
 				err = NULL;
 				goto out_real_path;
 			} else {
 				err = drgn_error_format_os("readlink", errno,
 							   "%s/%s",
 							   map_files_path,
-							   line);
+							   map_files_name);
 				goto out_real_path;
 			}
 		} else if (r == bufsiz) {
@@ -4476,7 +4512,7 @@ process_add_mapping(struct process_loaded_module_iterator *it,
 			// mapping being replaced by a different path.
 			drgn_log_debug(prog,
 				       "mapping %s path changed; skipping\n",
-				       line);
+				       map_files_name);
 			err = NULL;
 			goto out_real_path;
 		} else {
@@ -4490,7 +4526,7 @@ process_add_mapping(struct process_loaded_module_iterator *it,
 		// number in different Btrfs subvolumes is unlikely, so this is
 		// also not a big deal.
 		struct stat st;
-		if (fstatat(map_files_fd, line, &st, 0) < 0) {
+		if (fstatat(map_files_fd, map_files_name, &st, 0) < 0) {
 			if (errno == EPERM) {
 				if (!*logged_stat_eperm) {
 					drgn_log_debug(prog,
@@ -4501,14 +4537,14 @@ process_add_mapping(struct process_loaded_module_iterator *it,
 			} else if (errno == ENOENT) {
 				// We raced with a change to the mapping.
 				drgn_log_debug(prog, "mapping %s disappeared\n",
-					       line);
+					       map_files_name);
 				err = NULL;
 				goto out_real_path;
 			} else {
 				err = drgn_error_format_os("stat", errno,
 							   "%s/%s",
 							   map_files_path,
-							   line);
+							   map_files_name);
 				goto out_real_path;
 			}
 		} else {
@@ -4546,9 +4582,9 @@ process_add_mapping(struct process_loaded_module_iterator *it,
 		// real_path is owned by the iterator now.
 		real_path = NULL;
 	}
-	err = drgn_add_mapped_file_range(ranges, segment_start, segment_end,
-					 segment_file_offset,
-					 files_it.entry->file);
+	err = drgn_add_mapped_file_segment(segments, segment_start, segment_end,
+					   segment_file_offset,
+					   files_it.entry->file);
 out_real_path:
 	free(real_path);
 	return err;
@@ -4600,7 +4636,8 @@ process_get_mapped_files(struct process_loaded_module_iterator *it)
 	char *line = NULL;
 	size_t n = 0;
 	bool logged_readlink_eperm = false, logged_stat_eperm = false;
-	struct drgn_mapped_file_ranges ranges = DRGN_MAPPED_FILE_RANGES_INIT;
+	struct drgn_mapped_file_segments segments =
+		DRGN_MAPPED_FILE_SEGMENTS_INIT;
 	for (;;) {
 		errno = 0;
 		ssize_t len;
@@ -4620,16 +4657,16 @@ process_get_mapped_files(struct process_loaded_module_iterator *it)
 		drgn_log_debug(prog, "read %s\n", line);
 		err = process_add_mapping(it, maps_path, map_files_path,
 					  map_files_fd, &logged_readlink_eperm,
-					  &logged_stat_eperm, &ranges, line,
+					  &logged_stat_eperm, &segments, line,
 					  len);
 		if (err)
 			break;
 	}
 	if (err) {
-		drgn_mapped_file_ranges_abort(&ranges);
+		drgn_mapped_file_segments_abort(&segments);
 	} else {
-		userspace_loaded_module_iterator_set_file_ranges(&it->u,
-								 &ranges);
+		userspace_loaded_module_iterator_set_file_segments(&it->u,
+								   &segments);
 	}
 
 	free(line);
@@ -4765,7 +4802,8 @@ core_get_mapped_files(struct core_loaded_module_iterator *it)
 			return err;
 	}
 
-	struct drgn_mapped_file_ranges ranges = DRGN_MAPPED_FILE_RANGES_INIT;
+	struct drgn_mapped_file_segments segments =
+		DRGN_MAPPED_FILE_SEGMENTS_INIT;
 	for (uint64_t i = 0; i < count; i++) {
 		struct nt_file_segment64 segment;
 #define visit_nt_file_segment_members(visit_scalar_member, visit_raw_member) do {	\
@@ -4812,17 +4850,17 @@ core_get_mapped_files(struct core_loaded_module_iterator *it)
 				goto err;
 			}
 		}
-		err = drgn_add_mapped_file_range(&ranges, segment.start,
+		err = drgn_add_mapped_file_segment(&segments, segment.start,
 						 segment.end,
 						 segment.file_offset, file);
 		if (err)
 			goto err;
 	}
-	userspace_loaded_module_iterator_set_file_ranges(&it->u, &ranges);
+	userspace_loaded_module_iterator_set_file_segments(&it->u, &segments);
 	return NULL;
 
 err:
-	drgn_mapped_file_ranges_abort(&ranges);
+	drgn_mapped_file_segments_abort(&segments);
 	return err;
 }
 
