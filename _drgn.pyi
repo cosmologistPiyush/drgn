@@ -955,7 +955,11 @@ class Module:
     """TODO"""
     loaded_file_path: Optional[str]
     """TODO"""
+    loaded_file_bias: Optional[int]
+    """TODO"""
     debug_file_path: Optional[str]
+    """TODO"""
+    debug_file_bias: Optional[int]
     """TODO"""
     gnu_debugaltlink_file_path: Optional[str]
     """TODO"""

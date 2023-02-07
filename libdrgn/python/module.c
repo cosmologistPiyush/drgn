@@ -426,12 +426,26 @@ static PyObject *Module_get_loaded_file_path(Module *self, void *arg)
 	return PyUnicode_DecodeFSDefault(path);
 }
 
+static PyObject *Module_get_loaded_file_bias(Module *self, void *arg)
+{
+	if (!drgn_module_loaded_file_path(self->module))
+		Py_RETURN_NONE;
+	return PyLong_FromUint64(drgn_module_loaded_file_bias(self->module));
+}
+
 static PyObject *Module_get_debug_file_path(Module *self, void *arg)
 {
 	const char *path = drgn_module_debug_file_path(self->module);
 	if (!path)
 		Py_RETURN_NONE;
 	return PyUnicode_DecodeFSDefault(path);
+}
+
+static PyObject *Module_get_debug_file_bias(Module *self, void *arg)
+{
+	if (!drgn_module_debug_file_path(self->module))
+		Py_RETURN_NONE;
+	return PyLong_FromUint64(drgn_module_debug_file_bias(self->module));
 }
 
 static PyObject *Module_get_gnu_debugaltlink_file_path(Module *self, void *arg)
@@ -465,8 +479,12 @@ static PyGetSetDef Module_getset[] = {
 	 drgn_Module_build_id_DOC},
 	{"loaded_file_path", (getter)Module_get_loaded_file_path, NULL,
 	 drgn_Module_loaded_file_path_DOC},
+	{"loaded_file_bias", (getter)Module_get_loaded_file_bias, NULL,
+	 drgn_Module_loaded_file_bias_DOC},
 	{"debug_file_path", (getter)Module_get_debug_file_path, NULL,
 	 drgn_Module_debug_file_path_DOC},
+	{"debug_file_bias", (getter)Module_get_debug_file_bias, NULL,
+	 drgn_Module_debug_file_bias_DOC},
 	{"gnu_debugaltlink_file_path",
 	 (getter)Module_get_gnu_debugaltlink_file_path, NULL,
 	 drgn_Module_gnu_debugaltlink_file_path_DOC},

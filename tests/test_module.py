@@ -40,7 +40,9 @@ class TestModule(TestCase):
         self.assertIsNone(module.end)
         self.assertIsNone(module.build_id)
         self.assertIsNone(module.loaded_file_path)
+        self.assertIsNone(module.loaded_file_bias)
         self.assertIsNone(module.debug_file_path)
+        self.assertIsNone(module.debug_file_bias)
         self.assertIsNone(module.gnu_debugaltlink_file_path)
 
     def test_main_module(self):
@@ -830,104 +832,223 @@ class TestLinuxUserspaceCoreDump(TestCase):
     def test_loaded_modules(self):
         prog = Program()
         prog.set_core_dump(get_resource("crashme.core"))
-        loaded_modules = list(prog.loaded_modules())
 
+        loaded_modules = list(prog.loaded_modules())
         found_modules = []
 
-        with self.subTest(module="main"):
+        with self.subTest(module='main'):
             module = prog.find_main_module()
             found_modules.append(module)
-            self.assertEqual(module.name, "/home/osandov/crashme")
-            self.assertEqual((module.start, module.end), (0x400000, 0x404020))
-            self.assertEqual(
-                module.build_id.hex(), "25e877d9b9707a4aff131bac107da92f86f03666"
-            )
+            self.assertEqual(module.name, '/home/osandov/crashme')
+            self.assertEqual((module.start, module.end), (0x400000, 0x404028))
+            self.assertEqual(module.build_id.hex(), '2234a580c5a7ed96515417e2363e38fec4575281')
 
-        with self.subTest(module="libc"):
-            module = prog.find_shared_library_module("/lib64/libc.so.6", 0x7FE274CC2B80)
+        with self.subTest(module='crashme'):
+            module = prog.find_shared_library_module('/home/osandov/crashme.so', 0x7fe154d2ce20)
             found_modules.append(module)
-            self.assertEqual(
-                (module.start, module.end), (0x7FE274AF0000, 0x7FE274CCCD50)
-            )
-            self.assertEqual(
-                module.build_id.hex(), "81daba31ee66dbd63efdc4252a872949d874d136"
-            )
+            self.assertEqual((module.start, module.end), (0x7fe154d29000, 0x7fe154d2d028))
+            self.assertEqual(module.build_id.hex(), '045686d8fbc29df343dd452fc3b35de12cca3a7e')
 
-        with self.subTest(module="ld-linux"):
-            module = prog.find_shared_library_module(
-                "/lib64/ld-linux-x86-64.so.2", 0x7FE274D15DE0
-            )
+        with self.subTest(module='libc'):
+            module = prog.find_shared_library_module('/lib64/libc.so.6', 0x7fe154d0bb80)
             found_modules.append(module)
-            self.assertEqual(
-                (module.start, module.end), (0x7FE274CE1000, 0x7FE274D172B8)
-            )
-            self.assertEqual(
-                module.build_id.hex(), "bb6fec54c7521fddc569a2f4e141dfb97bf3acbe"
-            )
+            self.assertEqual((module.start, module.end), (0x7fe154b39000, 0x7fe154d15d50))
+            self.assertEqual(module.build_id.hex(), '81daba31ee66dbd63efdc4252a872949d874d136')
 
-        with self.subTest(module="vdso"):
-            module = prog.find_vdso_module("linux-vdso.so.1", 0x7FFC5D1F83E0)
+        with self.subTest(module='ld-linux'):
+            module = prog.find_shared_library_module('/lib64/ld-linux-x86-64.so.2', 0x7fe154d64de0)
             found_modules.append(module)
-            self.assertEqual(
-                (module.start, module.end), (0x7FFC5D1F8000, 0x7FFC5D1F8D5D)
-            )
-            self.assertEqual(
-                module.build_id.hex(), "cdb1c24936a1dce1d1e13b795a8f5b776849da25"
-            )
+            self.assertEqual((module.start, module.end), (0x7fe154d30000, 0x7fe154d662b8))
+            self.assertEqual(module.build_id.hex(), 'bb6fec54c7521fddc569a2f4e141dfb97bf3acbe')
+
+        with self.subTest(module='vdso'):
+            module = prog.find_vdso_module('linux-vdso.so.1', 0x7ffeb18ec3e0)
+            found_modules.append(module)
+            self.assertEqual((module.start, module.end), (0x7ffeb18ec000, 0x7ffeb18ecd5d))
+            self.assertEqual(module.build_id.hex(), '320b9b38597b3c1894dc1a40674729b29a2de12c')
 
         self.assertCountEqual(loaded_modules, found_modules)
+
+    def test_vdso_file_in_core(self):
+        prog = Program()
+        prog.set_core_dump(get_resource("crashme.core"))
+        for module in prog.loaded_modules():
+            if isinstance(module, VdsoModule):
+                status = module.try_local_files(want_debug=False)
+                self.assertEqual(status.loaded_status, ModuleFileStatus.SUCCEEDED)
+                self.assertEqual(module.loaded_file_path, "")
+
+    def test_bias(self):
+        prog = Program()
+        prog.set_core_dump(get_resource("crashme.core"))
+
+        for _ in prog.loaded_modules():
+            pass
+
+        with self.subTest(module='main'):
+            module = prog.find_main_module()
+            module.try_file(get_resource("crashme"))
+            self.assertEqual(module.loaded_file_bias, 0)
+            self.assertEqual(module.debug_file_bias, 0)
+
+        with self.subTest(module='crashme'):
+            module = prog.find_shared_library_module('/home/osandov/crashme.so', 0x7fe154d2ce20)
+            module.try_file(get_resource("crashme.so"))
+            self.assertEqual(module.loaded_file_bias, 0x7fe154d29000)
+            self.assertEqual(module.debug_file_bias, 0x7fe154d29000)
+
+        with self.subTest(module='vdso'):
+            module = prog.find_vdso_module('linux-vdso.so.1', 0x7ffeb18ec3e0)
+            module.try_local_files(want_debug=False)
+            self.assertEqual(module.loaded_file_bias, 0x7ffeb18ec000)
+            self.assertIsNone(module.debug_file_bias)
 
     def test_loaded_modules_pie(self):
         prog = Program()
         prog.set_core_dump(get_resource("crashme_pie.core"))
-        loaded_modules = list(prog.loaded_modules())
 
+        loaded_modules = list(prog.loaded_modules())
         found_modules = []
 
-        with self.subTest(module="main"):
+        with self.subTest(module='main'):
             module = prog.find_main_module()
             found_modules.append(module)
-            self.assertEqual(module.name, "/home/osandov/crashme_pie")
-            self.assertEqual(
-                (module.start, module.end), (0x5634C4223000, 0x5634C4227028)
-            )
-            self.assertEqual(
-                module.build_id.hex(), "40323a00d6c45293a571be6c0f91212ed06547fe"
-            )
+            self.assertEqual(module.name, '/home/osandov/crashme_pie')
+            self.assertEqual((module.start, module.end), (0x55b3f015a000, 0x55b3f015e030))
+            self.assertEqual(module.build_id.hex(), '678fde00d6638cecc07970153199f27e4a68175e')
 
-        with self.subTest(module="libc"):
-            module = prog.find_shared_library_module("/lib64/libc.so.6", 0x7F06254E2B80)
+        with self.subTest(module='crashme'):
+            module = prog.find_shared_library_module('/home/osandov/crashme.so', 0x7fb63ce43e20)
             found_modules.append(module)
-            self.assertEqual(
-                (module.start, module.end), (0x7F0625310000, 0x7F06254ECD50)
-            )
-            self.assertEqual(
-                module.build_id.hex(), "81daba31ee66dbd63efdc4252a872949d874d136"
-            )
+            self.assertEqual((module.start, module.end), (0x7fb63ce40000, 0x7fb63ce44028))
+            self.assertEqual(module.build_id.hex(), '045686d8fbc29df343dd452fc3b35de12cca3a7e')
 
-        with self.subTest(module="ld-linux"):
-            module = prog.find_shared_library_module(
-                "/lib64/ld-linux-x86-64.so.2", 0x7F0625535DE0
-            )
+        with self.subTest(module='libc'):
+            module = prog.find_shared_library_module('/lib64/libc.so.6', 0x7fb63ce22b80)
             found_modules.append(module)
-            self.assertEqual(
-                (module.start, module.end), (0x7F0625501000, 0x7F06255372B8)
-            )
-            self.assertEqual(
-                module.build_id.hex(), "bb6fec54c7521fddc569a2f4e141dfb97bf3acbe"
-            )
+            self.assertEqual((module.start, module.end), (0x7fb63cc50000, 0x7fb63ce2cd50))
+            self.assertEqual(module.build_id.hex(), '81daba31ee66dbd63efdc4252a872949d874d136')
 
-        with self.subTest(module="vdso"):
-            module = prog.find_vdso_module("linux-vdso.so.1", 0x7FFF9A7FC3E0)
+        with self.subTest(module='ld-linux'):
+            module = prog.find_shared_library_module('/lib64/ld-linux-x86-64.so.2', 0x7fb63ce7bde0)
             found_modules.append(module)
-            self.assertEqual(
-                (module.start, module.end), (0x7FFF9A7FC000, 0x7FFF9A7FCD5D)
-            )
-            self.assertEqual(
-                module.build_id.hex(), "cdb1c24936a1dce1d1e13b795a8f5b776849da25"
-            )
+            self.assertEqual((module.start, module.end), (0x7fb63ce47000, 0x7fb63ce7d2b8))
+            self.assertEqual(module.build_id.hex(), 'bb6fec54c7521fddc569a2f4e141dfb97bf3acbe')
+
+        with self.subTest(module='vdso'):
+            module = prog.find_vdso_module('linux-vdso.so.1', 0x7fff5557c3e0)
+            found_modules.append(module)
+            self.assertEqual((module.start, module.end), (0x7fff5557c000, 0x7fff5557cd5d))
+            self.assertEqual(module.build_id.hex(), '320b9b38597b3c1894dc1a40674729b29a2de12c')
 
         self.assertCountEqual(loaded_modules, found_modules)
+
+    def test_bias_pie(self):
+        prog = Program()
+        prog.set_core_dump(get_resource("crashme_pie.core"))
+
+        for _ in prog.loaded_modules():
+            pass
+
+        with self.subTest(module='main'):
+            module = prog.find_main_module()
+            module.try_file(get_resource("crashme_pie"))
+            self.assertEqual(module.loaded_file_bias, 0x55b3f015a000)
+            self.assertEqual(module.debug_file_bias, 0x55b3f015a000)
+
+        with self.subTest(module='crashme'):
+            module = prog.find_shared_library_module('/home/osandov/crashme.so', 0x7fb63ce43e20)
+            module.try_file(get_resource("crashme.so"))
+            self.assertEqual(module.loaded_file_bias, 0x7fb63ce40000)
+            self.assertEqual(module.debug_file_bias, 0x7fb63ce40000)
+
+        with self.subTest(module='vdso'):
+            module = prog.find_vdso_module('linux-vdso.so.1', 0x7fff5557c3e0)
+            module.try_local_files(want_debug=False)
+            self.assertEqual(module.loaded_file_bias, 0x7fff5557c000)
+            self.assertIsNone(module.debug_file_bias)
+
+    def test_loaded_modules_static(self):
+        prog = Program()
+        prog.set_core_dump(get_resource("crashme_static.core"))
+
+        loaded_modules = list(prog.loaded_modules())
+        found_modules = []
+
+        with self.subTest(module='main'):
+            module = prog.find_main_module()
+            found_modules.append(module)
+            self.assertEqual(module.name, '/home/osandov/crashme_static')
+            self.assertEqual((module.start, module.end), (0x400000, 0x4042b8))
+            self.assertEqual(module.build_id.hex(), '82dc250a5e1dca1bf312f6af36a4f394688c48f3')
+
+        with self.subTest(module='vdso'):
+            module = prog.find_vdso_module('linux-vdso.so.1', 0x7ffc12b533e0)
+            found_modules.append(module)
+            self.assertEqual((module.start, module.end), (0x7ffc12b53000, 0x7ffc12b53d5d))
+            self.assertEqual(module.build_id.hex(), '320b9b38597b3c1894dc1a40674729b29a2de12c')
+
+        self.assertCountEqual(loaded_modules, found_modules)
+
+    def test_bias_static(self):
+        prog = Program()
+        prog.set_core_dump(get_resource("crashme_static.core"))
+
+        for _ in prog.loaded_modules():
+            pass
+
+        with self.subTest(module='main'):
+            module = prog.find_main_module()
+            module.try_file(get_resource("crashme_static"))
+            self.assertEqual(module.loaded_file_bias, 0x0)
+            self.assertEqual(module.debug_file_bias, 0x0)
+
+        with self.subTest(module='vdso'):
+            module = prog.find_vdso_module('linux-vdso.so.1', 0x7ffc12b533e0)
+            module.try_local_files(want_debug=False)
+            self.assertEqual(module.loaded_file_bias, 0x7ffc12b53000)
+            self.assertIsNone(module.debug_file_bias)
+
+    def test_loaded_modules_static_pie(self):
+        prog = Program()
+        prog.set_core_dump(get_resource("crashme_static_pie.core"))
+
+        loaded_modules = list(prog.loaded_modules())
+        found_modules = []
+
+        with self.subTest(module='main'):
+            module = prog.find_main_module()
+            found_modules.append(module)
+            self.assertEqual(module.name, '/home/osandov/crashme_static_pie')
+            self.assertEqual((module.start, module.end), (0x7f9fa3f4b000, 0x7f9fa3f4f298))
+            self.assertEqual(module.build_id.hex(), 'eb78014e8a1fc1a69b808dd724efe6ce5cf10e0d')
+
+        with self.subTest(module='vdso'):
+            module = prog.find_vdso_module('linux-vdso.so.1', 0x7ffd67df13e0)
+            found_modules.append(module)
+            self.assertEqual((module.start, module.end), (0x7ffd67df1000, 0x7ffd67df1d5d))
+            self.assertEqual(module.build_id.hex(), '320b9b38597b3c1894dc1a40674729b29a2de12c')
+
+        self.assertCountEqual(loaded_modules, found_modules)
+
+    def test_bias_static_pie(self):
+        prog = Program()
+        prog.set_core_dump(get_resource("crashme_static_pie.core"))
+
+        for _ in prog.loaded_modules():
+            pass
+
+        with self.subTest(module='main'):
+            module = prog.find_main_module()
+            module.try_file(get_resource("crashme_static_pie"))
+            self.assertEqual(module.loaded_file_bias, 0x7f9fa3f4b000)
+            self.assertEqual(module.debug_file_bias, 0x7f9fa3f4b000)
+
+        with self.subTest(module='vdso'):
+            module = prog.find_vdso_module('linux-vdso.so.1', 0x7ffd67df13e0)
+            module.try_local_files(want_debug=False)
+            self.assertEqual(module.loaded_file_bias, 0x7ffd67df1000)
+            self.assertIsNone(module.debug_file_bias)
 
     @unittest.expectedFailure  # TODO
     def test_loaded_modules_pie_no_headers(self):
@@ -996,34 +1117,6 @@ class TestLinuxUserspaceCoreDump(TestCase):
             )
             self.assertEqual(
                 module.build_id.hex(), "bb6fec54c7521fddc569a2f4e141dfb97bf3acbe"
-            )
-
-        self.assertCountEqual(loaded_modules, found_modules)
-
-    def test_loaded_modules_static(self):
-        prog = Program()
-        prog.set_core_dump(get_resource("crashme_static.core"))
-        loaded_modules = list(prog.loaded_modules())
-
-        found_modules = []
-
-        with self.subTest(module="main"):
-            module = prog.find_main_module()
-            found_modules.append(module)
-            self.assertEqual(module.name, "/home/osandov/crashme_static")
-            self.assertEqual((module.start, module.end), (0x400000, 0x4AEAC0))
-            self.assertEqual(
-                module.build_id.hex(), "ee22e2264c5c69f4a690da2ffee790570436907a"
-            )
-
-        with self.subTest(module="vdso"):
-            module = prog.find_vdso_module("linux-vdso.so.1", 0x7FFFE2D823E0)
-            found_modules.append(module)
-            self.assertEqual(
-                (module.start, module.end), (0x7FFFE2D82000, 0x7FFFE2D82D5D)
-            )
-            self.assertEqual(
-                module.build_id.hex(), "cdb1c24936a1dce1d1e13b795a8f5b776849da25"
             )
 
         self.assertCountEqual(loaded_modules, found_modules)

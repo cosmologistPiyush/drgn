@@ -807,7 +807,11 @@ struct drgn_error *drgn_module_set_build_id(struct drgn_module *module,
 
 const char *drgn_module_loaded_file_path(const struct drgn_module *module);
 
+uint64_t drgn_module_loaded_file_bias(const struct drgn_module *module);
+
 const char *drgn_module_debug_file_path(const struct drgn_module *module);
+
+uint64_t drgn_module_debug_file_bias(const struct drgn_module *module);
 
 const char *
 drgn_module_gnu_debugaltlink_file_path(const struct drgn_module *module);

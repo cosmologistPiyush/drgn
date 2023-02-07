@@ -575,9 +575,21 @@ const char *drgn_module_loaded_file_path(const struct drgn_module *module)
 }
 
 LIBDRGN_PUBLIC
+uint64_t drgn_module_loaded_file_bias(const struct drgn_module *module)
+{
+	return module->loaded_file_bias;
+}
+
+LIBDRGN_PUBLIC
 const char *drgn_module_debug_file_path(const struct drgn_module *module)
 {
 	return module->debug_file ? module->debug_file->path : NULL;
+}
+
+LIBDRGN_PUBLIC
+uint64_t drgn_module_debug_file_bias(const struct drgn_module *module)
+{
+	return module->debug_file_bias;
 }
 
 LIBDRGN_PUBLIC const char *
@@ -734,6 +746,75 @@ drgn_module_find_gnu_debugaltlink_file(struct drgn_module *module,
 	}
 	*ret = trying.found;
 	return NULL;
+}
+
+// TODO: comment
+static bool elf_main_bias(struct drgn_program *prog, Elf *elf, uint64_t *ret)
+{
+	GElf_Ehdr ehdr_mem, *ehdr = gelf_getehdr(elf, &ehdr_mem);
+	if (!ehdr) {
+		drgn_log_debug(prog, "gelf_getehdr: %s\n", elf_errmsg(-1));
+		return false;
+	}
+
+	size_t phnum;
+	if (elf_getphdrnum(elf, &phnum) != 0) {
+		drgn_log_debug(prog, "elf_getphdrnum: %s\n", elf_errmsg(-1));
+		return false;
+	}
+
+	uint64_t phdr_vaddr;
+	bool have_phdr_vaddr = false;
+	for (size_t i = 0; i < phnum; i++) {
+		GElf_Phdr phdr_mem, *phdr = gelf_getphdr(elf, i, &phdr_mem);
+		if (!phdr) {
+			drgn_log_debug(prog, "gelf_getphdr: %s\n",
+				       elf_errmsg(-1));
+			return false;
+		}
+		if (phdr->p_type == PT_LOAD &&
+		    phdr->p_offset <= ehdr->e_phoff &&
+		    ehdr->e_phoff < phdr->p_offset + phdr->p_filesz) {
+			phdr_vaddr = ehdr->e_phoff - phdr->p_offset + phdr->p_vaddr;
+			have_phdr_vaddr = true;
+		}
+	}
+	if (!have_phdr_vaddr) {
+		drgn_log_debug(prog,
+			       "file does not have loadable segment containing e_phoff");
+		return false;
+	}
+	*ret = prog->auxv.at_phdr - phdr_vaddr;
+	return true;
+}
+
+// TODO: comment
+static bool elf_dso_bias(struct drgn_program *prog, Elf *elf,
+			 uint64_t dynamic_address, uint64_t *ret)
+{
+	size_t phnum;
+	if (elf_getphdrnum(elf, &phnum) != 0) {
+		drgn_log_debug(prog, "elf_getphdrnum: %s\n", elf_errmsg(-1));
+		return false;
+	}
+
+	for (size_t i = 0; i < phnum; i++) {
+		GElf_Phdr phdr_mem, *phdr = gelf_getphdr(elf, i, &phdr_mem);
+		if (!phdr) {
+			drgn_log_debug(prog, "gelf_getphdr: %s\n",
+				       elf_errmsg(-1));
+			return false;
+		}
+		if (phdr->p_type == PT_DYNAMIC) {
+			*ret = dynamic_address - phdr->p_vaddr;
+			drgn_log_debug(prog,
+				       "got bias 0x%" PRIx64 " from PT_DYNAMIC program header\n",
+				       *ret);
+			return true;
+		}
+	}
+	drgn_log_debug(prog, "file does not have PT_DYNAMIC program header");
+	return false;
 }
 
 // Get the address range of an ELF file from the start address of the first
@@ -921,6 +1002,32 @@ drgn_module_maybe_use_elf_file(struct drgn_module *module,
 		goto unused;
 	}
 
+	uint64_t bias = 0;
+	if ((prog->flags & DRGN_PROGRAM_IS_LINUX_KERNEL) &&
+	    module->kind == DRGN_MODULE_MAIN) {
+		bias = prog->vmcoreinfo.kaslr_offset;
+		drgn_log_debug(prog, "got bias 0x%" PRIx64 " from VMCOREINFO\n",
+			       bias);
+	} else if (module->kind == DRGN_MODULE_MAIN) {
+		if (!elf_main_bias(prog, file->elf, &bias)) {
+			err = NULL;
+			goto unused;
+		}
+	} else if (module->kind == DRGN_MODULE_SHARED_LIBRARY) {
+		if (!elf_dso_bias(prog, file->elf,
+				  module->shared_library.dynamic_address,
+				  &bias)) {
+			err = NULL;
+			goto unused;
+		}
+	} else if (module->kind == DRGN_MODULE_VDSO) {
+		if (!elf_dso_bias(prog, file->elf, module->vdso.dynamic_address,
+				  &bias)) {
+			err = NULL;
+			goto unused;
+		}
+	}
+
 	// TODO:
 	// - Copy section addresses
 
@@ -981,25 +1088,16 @@ drgn_module_maybe_use_elf_file(struct drgn_module *module,
 	// TODO: set build ID (UNLESS SOMEONE ALREADY DID)
 	// TODO: queue to be indexed
 
-	uint64_t bias = 0;
-	if ((prog->flags & DRGN_PROGRAM_IS_LINUX_KERNEL) &&
-	    module->kind == DRGN_MODULE_MAIN) {
-		bias = prog->vmcoreinfo.kaslr_offset;
-		drgn_log_debug(prog, "got bias 0x%" PRIx64 " from VMCOREINFO\n",
-			       bias);
-	}
-	// TODO: bias for other things.
-
 	drgn_module_set_address_range_from_elf_file(module, file, bias);
 
 	if (use_loaded) {
 		module->loaded_file = file;
-		module->loaded_file_bias = prog->vmcoreinfo.kaslr_offset;
+		module->loaded_file_bias = bias;
 		state->want_loaded = false;
 	}
 	if (use_debug) {
 		module->debug_file = file;
-		module->debug_file_bias = prog->vmcoreinfo.kaslr_offset;
+		module->debug_file_bias = bias;
 		state->want_debug = false;
 		module->pending_indexing_next =
 			prog->dbinfo->modules_pending_indexing;
