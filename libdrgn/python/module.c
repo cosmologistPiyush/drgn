@@ -220,8 +220,12 @@ drgnpy_need_gnu_debugaltlink_file(struct drgn_module *module,
 				  size_t build_id_len,
 				  const char *build_id_str)
 {
+	struct drgn_error *err;
 	struct drgnpy_module_try_files_arg *arg = args->arg;
 	PyObject *ret = NULL;
+
+	PyGILState_STATE gstate = PyGILState_Ensure();
+
 	PyObject *kwds = PyDict_New();
 	if (!kwds)
 		goto out;
@@ -244,10 +248,14 @@ drgnpy_need_gnu_debugaltlink_file(struct drgn_module *module,
 out_kwds:
 	Py_DECREF(kwds);
 out:
-	if (!ret)
-		return drgn_error_from_python();
-	Py_DECREF(ret);
-	return NULL;
+	if (ret) {
+		Py_DECREF(ret);
+		err = NULL;
+	} else {
+		err = drgn_error_from_python();
+	}
+	PyGILState_Release(gstate);
+	return err;
 }
 
 #define MODULE_TRY_FILES_ARGS_KEYWORDS	\

@@ -424,6 +424,7 @@ class TestModuleTryFileBuildId(TestCase):
             self.assertEqual(
                 module.try_file(f.name).debug_status, ModuleFileStatus.SUCCEEDED
             )
+            self.assertEqual(module.build_id, b"\x01\x23\x45\x67\x89\xab\xcd\xef")
 
     def test_try_file_no_build_id_file_has_build_id_force(self):
         module = Program().extra_module("/foo/bar", 0)
@@ -562,7 +563,6 @@ class TestModuleTryLocalFiles(TestCase):
             self.assertEqual(module.loaded_file_path, f1.name)
             self.assertEqual(module.debug_file_path, f2.name)
 
-    @unittest.expectedFailure  # TODO
     def test_by_build_id_from_loaded(self):
         build_id = b"\x01\x23\x45\x67\x89\xab\xcd\xef"
 

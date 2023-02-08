@@ -141,7 +141,7 @@ struct drgn_module {
 	 */
 	void *build_id;
 	/**
-	 * Length of @ref drgn_module::gnu_build_id in bytes. Zero if the module
+	 * Length of @ref drgn_module::build_id in bytes. Zero if the module
 	 * does not have a GNU build ID.
 	 */
 	size_t build_id_len;
@@ -150,6 +150,8 @@ struct drgn_module {
 	 * module does not have a GNU build ID.
 	 *
 	 * Used for logging and finding debugging information.
+	 *
+	 * This is allocated together with @ref drgn_module::build_id.
 	 */
 	char *build_id_str;
 	// TODO
@@ -184,7 +186,6 @@ struct drgn_module {
 
 	struct drgn_module_trying_gnu_debugaltlink *trying_gnu_debugaltlink;
 	struct drgn_module *pending_indexing_next;
-	struct drgn_module *pending_indexing_prev;
 };
 
 struct drgn_error *drgn_module_find_or_create(struct drgn_program *prog,

@@ -457,7 +457,6 @@ static void drgn_module_destroy(struct drgn_module *module)
 	if (module->debug_file != module->loaded_file)
 		drgn_elf_file_destroy(module->debug_file);
 	drgn_elf_file_destroy(module->loaded_file);
-	free(module->build_id_str);
 	free(module->build_id);
 	free(module->name);
 	free(module);
@@ -541,6 +540,30 @@ const char *drgn_module_build_id(const struct drgn_module *module,
 	return module->build_id_str;
 }
 
+static void *drgn_module_alloc_build_id(size_t build_id_len)
+{
+	size_t alloc_size;
+	if (__builtin_mul_overflow(build_id_len, 3U, &alloc_size) ||
+	    __builtin_add_overflow(alloc_size, 1U, &alloc_size))
+		return NULL;
+	return malloc(alloc_size);
+}
+
+static void drgn_module_set_build_id_impl(struct drgn_module *module,
+					  const void *build_id,
+					  size_t build_id_len,
+					  void *build_id_buf)
+{
+	module->build_id = build_id_buf;
+	memcpy(module->build_id, build_id, build_id_len);
+
+	module->build_id_str = (char *)build_id_buf + build_id_len;
+	hexlify(build_id, build_id_len, module->build_id_str);
+	module->build_id_str[2 * build_id_len] = '\0';
+
+	module->build_id_len = build_id_len;
+}
+
 LIBDRGN_PUBLIC
 struct drgn_error *drgn_module_set_build_id(struct drgn_module *module,
 					    const void *build_id,
@@ -555,16 +578,12 @@ struct drgn_error *drgn_module_set_build_id(struct drgn_module *module,
 		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,
 					 "build ID is already set");
 	}
-	module->build_id = memdup(build_id, build_id_len);
-	if (!module->build_id)
+
+	char *build_id_buf = drgn_module_alloc_build_id(build_id_len);
+	if (!build_id_buf)
 		return &drgn_enomem;
-	module->build_id_str = ahexlify(build_id, build_id_len);
-	if (!module->build_id_str) {
-		free(module->build_id);
-		module->build_id = NULL;
-		return &drgn_enomem;
-	}
-	module->build_id_len = build_id_len;
+	drgn_module_set_build_id_impl(module, build_id, build_id_len,
+				      build_id_buf);
 	return NULL;
 }
 
@@ -748,7 +767,6 @@ drgn_module_find_gnu_debugaltlink_file(struct drgn_module *module,
 	return NULL;
 }
 
-// TODO: comment
 static bool elf_main_bias(struct drgn_program *prog, Elf *elf, uint64_t *ret)
 {
 	GElf_Ehdr ehdr_mem, *ehdr = gelf_getehdr(elf, &ehdr_mem);
@@ -788,7 +806,6 @@ static bool elf_main_bias(struct drgn_program *prog, Elf *elf, uint64_t *ret)
 	return true;
 }
 
-// TODO: comment
 static bool elf_dso_bias(struct drgn_program *prog, Elf *elf,
 			 uint64_t dynamic_address, uint64_t *ret)
 {
@@ -817,9 +834,35 @@ static bool elf_dso_bias(struct drgn_program *prog, Elf *elf,
 	return false;
 }
 
+static bool drgn_module_elf_file_bias(struct drgn_module *module,
+				      struct drgn_elf_file *file, uint64_t *ret)
+{
+	struct drgn_program *prog = module->prog;
+	if ((prog->flags & DRGN_PROGRAM_IS_LINUX_KERNEL) &&
+	    module->kind == DRGN_MODULE_MAIN) {
+		*ret = prog->vmcoreinfo.kaslr_offset;
+		drgn_log_debug(prog,
+			       "got bias 0x%" PRIx64 " from VMCOREINFO\n",
+			       *ret);
+		return true;
+	} else if (module->kind == DRGN_MODULE_MAIN) {
+		return elf_main_bias(prog, file->elf, ret);
+	} else if (module->kind == DRGN_MODULE_SHARED_LIBRARY) {
+		return elf_dso_bias(prog, file->elf,
+				    module->shared_library.dynamic_address,
+				    ret);
+	} else if (module->kind == DRGN_MODULE_VDSO) {
+		return elf_dso_bias(prog, file->elf,
+				    module->vdso.dynamic_address, ret);
+	} else {
+		*ret = 0;
+		return true;
+	}
+}
+
 // Get the address range of an ELF file from the start address of the first
 // loadable segment and the end address of the last loadable segment.
-static void
+static bool
 elf_address_range_from_first_and_last_phdr(struct drgn_program *prog, Elf *elf,
 					   uint64_t bias, uint64_t *start_ret,
 					   uint64_t *end_ret)
@@ -827,7 +870,7 @@ elf_address_range_from_first_and_last_phdr(struct drgn_program *prog, Elf *elf,
 	size_t phnum;
 	if (elf_getphdrnum(elf, &phnum) != 0) {
 		drgn_log_debug(prog, "elf_getphdrnum: %s\n", elf_errmsg(-1));
-		goto err;
+		return false;
 	}
 
 	uint64_t start;
@@ -838,7 +881,7 @@ elf_address_range_from_first_and_last_phdr(struct drgn_program *prog, Elf *elf,
 		if (!phdr) {
 			drgn_log_debug(prog, "gelf_getphdr: %s\n",
 				       elf_errmsg(-1));
-			goto err;
+			return false;
 		}
 		if (phdr->p_type == PT_LOAD) {
 			start = phdr->p_vaddr + bias;
@@ -847,7 +890,8 @@ elf_address_range_from_first_and_last_phdr(struct drgn_program *prog, Elf *elf,
 	}
 	if (i >= phnum) {
 		drgn_log_debug(prog, "file has no loadable segments\n");
-		goto err;
+		*start_ret = *end_ret = 0;
+		return true;
 	}
 
 	for (i = phnum; i-- > 0;) {
@@ -855,29 +899,29 @@ elf_address_range_from_first_and_last_phdr(struct drgn_program *prog, Elf *elf,
 		if (!phdr) {
 			drgn_log_debug(prog, "gelf_getphdr: %s\n",
 				       elf_errmsg(-1));
-			goto err;
+			return false;
 		}
 		if (phdr->p_type == PT_LOAD) {
 			uint64_t end = phdr->p_vaddr + phdr->p_memsz + bias;
 			if (start < end) {
 				*start_ret = start;
 				*end_ret = end;
-				return;
+				return true;
 			}
 			drgn_log_debug(prog,
 				       "first and last loadable segments are not valid\n");
-			goto err;
+			*start_ret = *end_ret = 0;
+			return true;
 		}
 	}
 	// This shouldn't happen.
 	drgn_log_debug(prog, "loadable segment disappeared\n");
-err:
-	*start_ret = *end_ret = 0;
+	return false;
 }
 
 // Get the address range of an ELF file from the minimum start address of any
 // loadable segment and the maximum end address of any loadable segment.
-static void
+static bool
 elf_address_range_from_min_and_max_phdr(struct drgn_program *prog, Elf *elf,
 					uint64_t bias, uint64_t *start_ret,
 					uint64_t *end_ret)
@@ -885,7 +929,7 @@ elf_address_range_from_min_and_max_phdr(struct drgn_program *prog, Elf *elf,
 	size_t phnum;
 	if (elf_getphdrnum(elf, &phnum) != 0) {
 		drgn_log_debug(prog, "elf_getphdrnum: %s\n", elf_errmsg(-1));
-		goto err;
+		return false;
 	}
 
 	uint64_t start = UINT64_MAX, end = 0;
@@ -894,7 +938,7 @@ elf_address_range_from_min_and_max_phdr(struct drgn_program *prog, Elf *elf,
 		if (!phdr) {
 			drgn_log_debug(prog, "gelf_getphdr: %s\n",
 				       elf_errmsg(-1));
-			goto err;
+			return false;
 		}
 		if (phdr->p_type == PT_LOAD) {
 			start = min(start, phdr->p_vaddr + bias);
@@ -904,30 +948,24 @@ elf_address_range_from_min_and_max_phdr(struct drgn_program *prog, Elf *elf,
 	if (start < end) {
 		*start_ret = start;
 		*end_ret = end;
-		return;
+		return true;
 	}
 
 	drgn_log_debug(prog, "file has no valid loadable segments\n");
-err:
 	*start_ret = *end_ret = 0;
+	return true;
 }
 
-static void
-drgn_module_set_address_range_from_elf_file(struct drgn_module *module,
-					    struct drgn_elf_file *file,
-					    uint64_t bias)
+static bool drgn_module_elf_file_address_range(struct drgn_module *module,
+					       struct drgn_elf_file *file,
+					       uint64_t bias,
+					       uint64_t *start_ret,
+					       uint64_t *end_ret)
 {
 	struct drgn_program *prog = module->prog;
-
-	if (module->start != UINT64_MAX) {
-		// Address range is already set.
-		return;
-	}
-
 	// The ELF specification says that "loadable segment entries in the
 	// program header table appear in ascending order, sorted on the p_vaddr
 	// member." However, this is not the case in practice.
-	uint64_t start, end;
 	if ((prog->flags & DRGN_PROGRAM_IS_LINUX_KERNEL) &&
 	    module->kind == DRGN_MODULE_MAIN) {
 		// vmlinux on some architectures contains special segments whose
@@ -937,8 +975,11 @@ drgn_module_set_address_range_from_elf_file(struct drgn_module *module,
 		// based on section names, we assume that these special segments
 		// are never first or last and that the segments are otherwise
 		// sorted, which seems to always be true.
-		elf_address_range_from_first_and_last_phdr(prog, file->elf,
-							   bias, &start, &end);
+		return elf_address_range_from_first_and_last_phdr(prog,
+								  file->elf,
+								  bias,
+								  start_ret,
+								  end_ret);
 	} else if (!(prog->flags & DRGN_PROGRAM_IS_LINUX_KERNEL) &&
 		   (module->kind == DRGN_MODULE_MAIN ||
 		    module->kind == DRGN_MODULE_SHARED_LIBRARY ||
@@ -957,20 +998,13 @@ drgn_module_set_address_range_from_elf_file(struct drgn_module *module,
 		//
 		// Since it's not enforced by some ELF loaders that we might
 		// encounter, we don't assume the sorted order, either.
-		elf_address_range_from_min_and_max_phdr(prog, file->elf, bias,
-							&start, &end);
+		return elf_address_range_from_min_and_max_phdr(prog, file->elf,
+							       bias, start_ret,
+							       end_ret);
 	} else {
-		return;
+		*start_ret = *end_ret = 0;
+		return true;
 	}
-
-	if (start >= end)
-		return;
-	drgn_log_debug(prog,
-		       "got address range 0x%" PRIx64 "-0x%" PRIx64 " from file\n",
-		       start, end);
-	struct drgn_error *err =
-		drgn_module_set_address_range(module, start, end);
-	assert(!err);
 }
 
 // TODO: explain file ownership
@@ -987,6 +1021,9 @@ drgn_module_maybe_use_elf_file(struct drgn_module *module,
 	const bool use_loaded = state->want_loaded && file->is_loadable;
 	const bool has_dwarf = drgn_elf_file_has_dwarf(file);
 	bool use_debug = state->want_debug && has_dwarf;
+
+	void *build_id_buf = NULL;
+
 	if (!use_loaded && !use_debug) {
 		if (file->is_loadable) {
 			drgn_log_debug(prog,
@@ -1002,39 +1039,51 @@ drgn_module_maybe_use_elf_file(struct drgn_module *module,
 		goto unused;
 	}
 
+	// Get everything that might fail before we commit to using the file.
+	const void *elf_build_id;
+	ssize_t elf_build_id_len = 0;
 	uint64_t bias = 0;
-	if ((prog->flags & DRGN_PROGRAM_IS_LINUX_KERNEL) &&
-	    module->kind == DRGN_MODULE_MAIN) {
-		bias = prog->vmcoreinfo.kaslr_offset;
-		drgn_log_debug(prog, "got bias 0x%" PRIx64 " from VMCOREINFO\n",
-			       bias);
-	} else if (module->kind == DRGN_MODULE_MAIN) {
-		if (!elf_main_bias(prog, file->elf, &bias)) {
+	uint64_t elf_start = 0, elf_end = 0;
+	if (!module->trying_gnu_debugaltlink) {
+		if (module->build_id_len == 0) {
+			elf_build_id_len =
+				dwelf_elf_gnu_build_id(file->elf,
+						       &elf_build_id);
+			if (elf_build_id_len < 0) {
+				drgn_log_debug(prog,
+					       "dwelf_elf_gnu_build_id: %s\n",
+					       elf_errmsg(-1));
+				err = NULL;
+				goto unused;
+			}
+			if (elf_build_id_len > 0) {
+				build_id_buf =
+					drgn_module_alloc_build_id(elf_build_id_len);
+				if (!build_id_buf) {
+					err = &drgn_enomem;
+					goto unused;
+				}
+			}
+		}
+
+		if (!drgn_module_elf_file_bias(module, file, &bias)) {
 			err = NULL;
 			goto unused;
 		}
-	} else if (module->kind == DRGN_MODULE_SHARED_LIBRARY) {
-		if (!elf_dso_bias(prog, file->elf,
-				  module->shared_library.dynamic_address,
-				  &bias)) {
-			err = NULL;
-			goto unused;
-		}
-	} else if (module->kind == DRGN_MODULE_VDSO) {
-		if (!elf_dso_bias(prog, file->elf, module->vdso.dynamic_address,
-				  &bias)) {
+		if (module->start == UINT64_MAX &&
+		    !drgn_module_elf_file_address_range(module, file, bias,
+							&elf_start, &elf_end)) {
 			err = NULL;
 			goto unused;
 		}
 	}
 
-	// TODO:
-	// - Copy section addresses
+	// TODO: Copy section addresses
 
 	if (use_debug) {
 		file->dwarf = dwarf_begin_elf(file->elf, DWARF_C_READ, NULL);
 		if (!file->dwarf) {
-			drgn_log_debug(prog, "%s: %s\n", file->path,
+			drgn_log_debug(prog, "dwarf_begin_elf: %s\n",
 				       dwarf_errmsg(-1));
 			use_debug = false;
 		}
@@ -1056,6 +1105,7 @@ drgn_module_maybe_use_elf_file(struct drgn_module *module,
 								     &gnu_debugaltlink_file);
 			if (err)
 				goto unused;
+
 			if (gnu_debugaltlink_file) {
 				dwarf_setalt(file->dwarf,
 					     gnu_debugaltlink_file->dwarf);
@@ -1075,6 +1125,9 @@ drgn_module_maybe_use_elf_file(struct drgn_module *module,
 		goto unused;
 	}
 
+	// At this point, we've committed to using the file. Nothing after this
+	// is allowed to fail.
+
 	if (use_loaded && use_debug) {
 		drgn_log_info(prog, "using loadable file with debug info %s\n",
 			      file->path);
@@ -1084,11 +1137,26 @@ drgn_module_maybe_use_elf_file(struct drgn_module *module,
 		drgn_log_info(prog, "using debug info file %s\n", file->path);
 	}
 
-	// TODO: set address range (UNLESS SOMEONE ALREADY DID)
-	// TODO: set build ID (UNLESS SOMEONE ALREADY DID)
-	// TODO: queue to be indexed
-
-	drgn_module_set_address_range_from_elf_file(module, file, bias);
+	// If we got a build ID or address range earlier, install them. Note
+	// that the need_gnu_debugaltlink_file callback could've set these in
+	// between when we checked whether they were already set and now, so
+	// check again.
+	if (module->build_id_len == 0 && elf_build_id_len > 0) {
+		drgn_module_set_build_id_impl(module, elf_build_id,
+					      elf_build_id_len, build_id_buf);
+		drgn_log_debug(prog, "got build ID %s from file\n",
+			       module->build_id_str);
+	} else {
+		free(build_id_buf);
+	}
+	if (module->start == UINT64_MAX && elf_start < elf_end) {
+		drgn_log_debug(prog,
+			       "got address range 0x%" PRIx64
+			       "-0x%" PRIx64 " from file\n",
+			       elf_start, elf_end);
+		err = drgn_module_set_address_range(module, elf_start, elf_end);
+		assert(!err);
+	}
 
 	if (use_loaded) {
 		module->loaded_file = file;
@@ -1101,10 +1169,6 @@ drgn_module_maybe_use_elf_file(struct drgn_module *module,
 		state->want_debug = false;
 		module->pending_indexing_next =
 			prog->dbinfo->modules_pending_indexing;
-		if (prog->dbinfo->modules_pending_indexing) {
-			prog->dbinfo->modules_pending_indexing->pending_indexing_prev
-				= module;
-		}
 		prog->dbinfo->modules_pending_indexing = module;
 	}
 	if (!prog->has_platform) {
@@ -1114,6 +1178,8 @@ drgn_module_maybe_use_elf_file(struct drgn_module *module,
 	return NULL;
 
 unused:
+	// TODO: explain
+	free(build_id_buf);
 	// TODO: explain
 	if (file != module->loaded_file && file != module->debug_file)
 		drgn_elf_file_destroy(file);
