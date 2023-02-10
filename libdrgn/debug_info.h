@@ -49,6 +49,8 @@ enum drgn_module_state {
 	DRGN_DEBUG_INFO_MODULE_INDEXED,
 } __attribute__((__packed__));
 
+DEFINE_HASH_TABLE_TYPE(drgn_elf_file_dwarf_table, struct drgn_elf_file *)
+
 /**
  * A module reported to a @ref drgn_debug_info.
  *
@@ -83,6 +85,8 @@ struct drgn_module {
 	 * drgn_module::debug_file.
 	 */
 	uint64_t debug_file_bias;
+
+	struct drgn_elf_file_dwarf_table split_dwarf_files;
 
 	/** DWARF debugging information. */
 	struct drgn_module_dwarf_info dwarf;
@@ -252,6 +256,10 @@ drgn_debug_info_find_object(const char *name, size_t name_len,
 			    const char *filename,
 			    enum drgn_find_object_flags flags, void *arg,
 			    struct drgn_object *ret);
+
+struct drgn_error *drgn_module_split_dwarf_file(struct drgn_module *module,
+						Dwarf *dwarf,
+						struct drgn_elf_file **ret);
 
 /**
  * Get the Call Frame Information in a @ref drgn_module at a given program

@@ -507,38 +507,86 @@ drgn_dwarf_index_read_cus(struct drgn_dwarf_index_state *state,
 			  struct drgn_elf_file *file,
 			  enum drgn_section_index scn)
 {
+	struct drgn_error *err;
 	struct drgn_dwarf_index_pending_cu_vector *cus =
 		&state->cus[omp_get_thread_num()];
 
-	struct drgn_error *err;
-	struct drgn_elf_file_section_buffer buffer;
-	drgn_elf_file_section_buffer_init_index(&buffer, file, scn);
-	while (binary_buffer_has_next(&buffer.bb)) {
+	Dwarf_Off off = 0;
+	Dwarf_Off next_off;
+	size_t header_size;
+	uint8_t offset_size;
+	uint64_t v4_type_signature;
+	uint64_t *v4_type_signaturep =
+		scn == DRGN_SCN_DEBUG_TYPES ? &v4_type_signature : NULL;
+	const char *buf = file->scn_data[scn]->d_buf;
+	size_t buf_len = file->scn_data[scn]->d_size;
+	int ret;
+	while ((ret = dwarf_next_unit(file->dwarf, off, &next_off, &header_size,
+				      NULL, NULL, NULL, &offset_size,
+				      v4_type_signaturep, NULL)) == 0) {
+		Dwarf_Die cudie, subdie;
+		if (!dwarf_offdie(file->dwarf, off + header_size, &cudie) ||
+		    dwarf_cu_info(cudie.cu, NULL, NULL, NULL, &subdie, NULL,
+				  NULL, NULL))
+			return drgn_error_libdw();
+
+		Dwarf *dwarf = file->dwarf;
+		struct drgn_elf_file *this_file = file;
+		const char *this_buf = buf;
+		size_t this_buf_len = buf_len;
+		enum drgn_section_index this_scn = scn;
+		Dwarf_Off this_off = off;
+		Dwarf_Off this_next_off = next_off;
+		if (subdie.cu) {
+			dwarf = dwarf_cu_getdwarf(subdie.cu);
+			if (dwarf != file->dwarf) {
+				err = drgn_module_split_dwarf_file(file->module,
+								   dwarf,
+								   &this_file);
+				if (err)
+					return err;
+				this_scn = DRGN_SCN_DEBUG_INFO;
+				this_buf = this_file->scn_data[this_scn]->d_buf;
+				this_buf_len = this_file->scn_data[this_scn]->d_size;
+				if (!((uintptr_t)this_buf <= (uintptr_t)subdie.addr &&
+				      (uintptr_t)subdie.addr < (uintptr_t)(this_buf + this_buf_len))) {
+					this_scn = DRGN_SCN_DEBUG_TYPES;
+					this_buf = this_file->scn_data[this_scn]->d_buf;
+					this_buf_len = this_file->scn_data[this_scn]->d_size;
+					if (!((uintptr_t)this_buf <= (uintptr_t)subdie.addr &&
+					      (uintptr_t)subdie.addr < (uintptr_t)(this_buf + this_buf_len))) {
+						return drgn_error_create(DRGN_ERROR_OTHER,
+									 "split DIE came from unknown section");
+					}
+				}
+				this_off = (const char *)subdie.addr - dwarf_cuoffset(&subdie) - this_buf;
+				if (dwarf_next_unit(dwarf, this_off,
+						    &this_next_off, NULL, NULL,
+						    NULL, NULL, &offset_size,
+						    this_scn == DRGN_SCN_DEBUG_TYPES ?
+						    &v4_type_signature : NULL,
+						    NULL))
+					return drgn_error_libdw();
+			}
+		}
+
 		struct drgn_dwarf_index_pending_cu *cu =
 			drgn_dwarf_index_pending_cu_vector_append_entry(cus);
 		if (!cu)
 			return &drgn_enomem;
-		cu->file = file;
-		cu->buf = buffer.bb.pos;
-		uint32_t unit_length32;
-		if ((err = binary_buffer_next_u32(&buffer.bb, &unit_length32)))
-			return err;
-		cu->is_64_bit = unit_length32 == UINT32_C(0xffffffff);
-		if (cu->is_64_bit) {
-			uint64_t unit_length64;
-			if ((err = binary_buffer_next_u64(&buffer.bb,
-							  &unit_length64)) ||
-			    (err = binary_buffer_skip(&buffer.bb,
-						      unit_length64)))
-				return err;
-		} else {
-			if ((err = binary_buffer_skip(&buffer.bb,
-						      unit_length32)))
-				return err;
-		}
-		cu->len = buffer.bb.pos - cu->buf;
-		cu->scn = scn;
+		cu->file = this_file;
+		cu->buf = this_buf + this_off;
+		if (next_off == (Dwarf_Off)-1)
+			cu->len = this_file->scn_data[this_scn]->d_size - this_off;
+		else
+			cu->len = this_next_off - this_off;
+		cu->is_64_bit = offset_size == 8;
+		cu->scn = this_scn;
+
+		off = next_off;
 	}
+	if (ret < 0)
+		return drgn_error_libdw();
 	return NULL;
 }
 
@@ -1245,6 +1293,13 @@ static struct drgn_error *read_cu(struct drgn_dwarf_index_cu_buffer *buffer)
 	if ((err = binary_buffer_skip(&buffer->bb,
 				      cu_header_extra_size(buffer->cu))))
 		return err;
+
+	// In DWARF 4 Debug Fission, there is no DW_AT_str_offsets_base; it is
+	// implicitly 0.
+	if (version < 5 && buffer->cu->file->scn_data[DRGN_SCN_DEBUG_STR_OFFSETS]) {
+		buffer->cu->str_offsets =
+			buffer->cu->file->scn_data[DRGN_SCN_DEBUG_STR_OFFSETS]->d_buf;
+	}
 
 	return read_abbrev_table(buffer->cu, debug_abbrev_offset);
 }
@@ -2730,7 +2785,7 @@ skip:
 			}
 
 			uint64_t file_name_hash;
-			if (decl_file_ptr) {
+			if (false && decl_file_ptr) {
 				if (decl_file >= cu->num_file_names) {
 					return binary_buffer_error_at(&buffer->bb,
 								      decl_file_ptr,
