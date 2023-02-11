@@ -2283,13 +2283,13 @@ drgn_module_try_download_files_internal(struct drgn_module *module,
 					struct drgn_module_try_files_state *state)
 {
 	struct drgn_error *err;
+	struct drgn_program *prog = module->prog;
 
 	// TODO: I don't like that this prints when it's cached
 	drgn_module_try_files_log(module, state, "downloading");
 
 	// TODO: what's up with ctrl-C?
 #ifdef WITH_DEBUGINFOD
-	struct drgn_program *prog = module->prog;
 	if (!prog->dbinfo->debuginfod_client) {
 		if (!drgn_have_debuginfod()) {
 			if (!prog->dbinfo->logged_no_debuginfod) {
